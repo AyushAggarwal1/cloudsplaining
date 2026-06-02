@@ -1,0 +1,29 @@
+[
+  {
+    "name": "tenancy-admins",
+    "compartmentId": "ocid1.tenancy.oc1..aaaa",
+    "statements": [
+      "Allow group Administrators to manage all-resources in tenancy",
+      "Allow group IAMAdmins to manage policies in tenancy",
+      "Allow group IAMAdmins to manage groups in tenancy"
+    ]
+  },
+  {
+    "name": "app-team",
+    "compartmentId": "ocid1.compartment.oc1..bbbb",
+    "statements": [
+      "Allow group AppTeam to manage object-family in compartment AppCompartment",
+      "Allow group AppTeam to read buckets in tenancy",
+      "Allow group AppTeam to manage secret-family in compartment AppCompartment",
+      "Allow group AppTeam to use instance-family in compartment AppCompartment where request.region = 'us-ashburn-1'"
+    ]
+  },
+  {
+    "name": "public-oops",
+    "compartmentId": "ocid1.compartment.oc1..cccc",
+    "statements": [
+      "Allow any-user to manage buckets in tenancy",
+      "Allow group Auditors to inspect all-resources in tenancy"
+    ]
+  }
+]
