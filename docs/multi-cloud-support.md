@@ -8,6 +8,13 @@ Cloudsplaining supports scanning IAM configurations across AWS, Azure, GCP, and 
 
 **Required permissions:** `iam:GetAccountAuthorizationDetails` (included in `SecurityAudit` policy)
 
+**Environment Variables**
+
+```bash
+export AWS_ACCESS_KEY_ID=
+export AWS_SECRET_ACCESS_KEY=
+```
+
 **Step 1 — Download IAM authorization details:**
 
 ```bash
@@ -22,7 +29,8 @@ cloudsplaining scan \
   --skip-open-report \
   --flag-all-risky-actions \
   --flag-trust-policies \
-  --verbose
+  --verbose \
+  --output tmp/
 ```
 
 ---
@@ -129,10 +137,18 @@ region=<region>
 key_file=<path-to-private-key>
 ```
 
+**Environment Variables**
+
+```bash
+export OCI_CONFIG_FILE=<path-to-config-file>
+```
+or --config-file
+
 **Step 3 — Collect snapshot:**
 
 ```bash
 cloudsplaining collect-cloud -p oci \
+  --config-file 'path' \
   --tenancy-id <tenancy-id> \
   -o oci-snapshot.json
 ```

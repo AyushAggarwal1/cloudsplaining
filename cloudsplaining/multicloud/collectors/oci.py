@@ -27,11 +27,13 @@ class OciCollector(Collector):
         self,
         tenancy_id: str | None = None,
         config_profile: str = "DEFAULT",
+        config_file: str | None = None,
         client: Any | None = None,
         **_: Any,
     ) -> None:
         self._tenancy_id = tenancy_id
         self._config_profile = config_profile
+        self._config_file = config_file
         self._client = client
 
     def client(self) -> tuple[Any, str]:
@@ -39,7 +41,10 @@ class OciCollector(Collector):
         if self._client is not None:
             return self._client, (self._tenancy_id or "")
         oci = self._import("oci")
-        config = oci.config.from_file(profile_name=self._config_profile)
+        kwargs: dict[str, str] = {"profile_name": self._config_profile}
+        if self._config_file:
+            kwargs["file_location"] = self._config_file
+        config = oci.config.from_file(**kwargs)
         tenancy = self._tenancy_id or config["tenancy"]
         return oci.identity.IdentityClient(config), tenancy
 
