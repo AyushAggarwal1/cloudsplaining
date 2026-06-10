@@ -1,9 +1,14 @@
 ## NOTE: This repo/project has been restored by Salesforce.
 
-Cloudsplaining
+Cloudsplaining - **Steroids**
 --------------
 
-Cloudsplaining is an AWS IAM Security Assessment tool that identifies violations of least privilege and generates a risk-prioritized HTML report.
+Cloudsplaining but on Steroids
+
+Cloudsplaining now supports Multicloud (AWS, Azure, GCP, OCI) 
+- Refer to [Docs](./docs/multi-cloud-support.md)
+
+--------------
 
 [![Tests](https://github.com/salesforce/cloudsplaining/workflows/Test/badge.svg)](https://github.com/salesforce/cloudsplaining/actions?query=workflow%3ATest)
 [![Documentation Status](https://readthedocs.org/projects/cloudsplaining/badge/?version=latest)](https://cloudsplaining.readthedocs.io/en/latest/?badge=latest)
