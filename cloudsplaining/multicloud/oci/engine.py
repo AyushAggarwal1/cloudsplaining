@@ -113,6 +113,13 @@ class OciProvider(Provider):
                     "statements": statements,
                     "GrantedAccess": granted,
                     "Path": "/",
+                    "PolicyVersionList": [
+                        {
+                            "Document": {"statements": statements},
+                            "VersionId": "v1",
+                            "IsDefaultVersion": True,
+                        }
+                    ],
                 },
             )
             model.add_policy(policy)

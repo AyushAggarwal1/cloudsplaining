@@ -146,6 +146,13 @@ class AzureProvider(Provider):
                     "Actions": list(actions),
                     "DataActions": list(data_actions),
                     "NotActions": sorted(_not_actions(role)),
+                    "PolicyVersionList": [
+                        {
+                            "Document": {"permissions": role.get("permissions", []) or []},
+                            "VersionId": "v1",
+                            "IsDefaultVersion": True,
+                        }
+                    ],
                 },
             )
             model.add_policy(policy)

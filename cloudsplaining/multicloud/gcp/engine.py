@@ -126,6 +126,13 @@ class GcpProvider(Provider):
                 "Path": "/",
                 # Full set of permissions the role grants.
                 "IncludedPermissions": list(permissions),
+                "PolicyVersionList": [
+                    {
+                        "Document": {"includedPermissions": list(permissions)},
+                        "VersionId": "v1",
+                        "IsDefaultVersion": True,
+                    }
+                ],
             },
         )
         model.add_policy(policy)
@@ -170,7 +177,22 @@ class GcpProvider(Provider):
                 cats.add("InfrastructureModification", severity, [role_name])
         elif role_name in c.PRIVILEGED_PREDEFINED_ROLES:
             cats.add_privesc("high", "privilege-escalation predefined role", [role_name])
-        policy = Policy(id=role_name, name=role_name, kind=kind, categories=cats.result(), metadata={"Path": "/"})
+        policy = Policy(
+            id=role_name,
+            name=role_name,
+            kind=kind,
+            categories=cats.result(),
+            metadata={
+                "Path": "/",
+                "PolicyVersionList": [
+                    {
+                        "Document": {"includedPermissions": []},
+                        "VersionId": "v1",
+                        "IsDefaultVersion": True,
+                    }
+                ],
+            },
+        )
         model.add_policy(policy)
         return policy
 
