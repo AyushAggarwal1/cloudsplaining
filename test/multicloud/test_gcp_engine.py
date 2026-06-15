@@ -1,7 +1,7 @@
 import unittest
 
 from cloudsplaining.multicloud.gcp.engine import GcpProvider
-from cloudsplaining.multicloud.model import CUSTOMER, MANAGED, ROLE, USER
+from cloudsplaining.multicloud.model import CUSTOMER, MANAGED, USER
 
 
 def _cat(policy, name):
@@ -46,7 +46,23 @@ class TestGcpEngine(unittest.TestCase):
         )
         self.assertIsNotNone(model.get_principal(USER, "user:a@b.com"))
         self.assertEqual(len(model.groups), 1)
-        self.assertEqual(len(model.roles), 1)  # service account
+        # service accounts are principals (identities), not roles — they land in users
+        self.assertEqual(len(model.users), 2)  # user:a@b.com + serviceAccount:sa@...
+        self.assertEqual(len(model.roles), 0)
+
+    def test_service_account_has_service_account_provider_kind(self):
+        model = self.provider.scan(
+            {
+                "serviceAccounts": [{"email": "my-sa@proj.iam.gserviceaccount.com", "uniqueId": "123", "displayName": "My SA"}],
+                "bindings": [
+                    {"role": "roles/storage.admin", "members": ["serviceAccount:my-sa@proj.iam.gserviceaccount.com"], "resource": "projects/p"}
+                ],
+            }
+        )
+        sa = model.get_principal(USER, "serviceAccount:my-sa@proj.iam.gserviceaccount.com")
+        self.assertIsNotNone(sa)
+        self.assertEqual(sa.metadata.get("provider_kind"), "service_account")
+        self.assertEqual(len(model.roles), 0)
 
     def test_binding_builds_attachment(self):
         model = self.provider.scan(

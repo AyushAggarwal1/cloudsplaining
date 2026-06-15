@@ -86,8 +86,12 @@ class GcpProvider(Provider):
                 Principal(
                     id=member,
                     name=email,
-                    kind=ROLE,
-                    metadata={"uniqueId": sa.get("uniqueId"), "displayName": sa.get("displayName")},
+                    kind=USER,
+                    metadata={
+                        "provider_kind": "service_account",
+                        "uniqueId": sa.get("uniqueId"),
+                        "displayName": sa.get("displayName"),
+                    },
                 )
             )
 
@@ -214,9 +218,14 @@ class GcpProvider(Provider):
         if ":" not in member:
             return model.add_principal(Principal(id=member, name=member, kind=ROLE))
         member_type, value = member.split(":", 1)
-        kind = {"user": USER, "group": GROUP, "serviceaccount": ROLE, "domain": GROUP}.get(
-            member_type.lower(), ROLE
-        )
+        if member_type.lower() == "serviceaccount":
+            existing = model.get_principal(USER, member)
+            if existing is not None:
+                return existing
+            return model.add_principal(
+                Principal(id=member, name=value, kind=USER, metadata={"provider_kind": "service_account"})
+            )
+        kind = {"user": USER, "group": GROUP, "domain": GROUP}.get(member_type.lower(), ROLE)
         existing = model.get_principal(kind, member)
         if existing is not None:
             return existing
