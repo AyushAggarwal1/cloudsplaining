@@ -73,6 +73,11 @@ and snake_case (OCI CLI emits kebab-case; SDKs emit snake_case; REST APIs camelC
 - **AWS** — `download` now generates and embeds the IAM credential report (`credentialReport` key;
   `--skip-credential-report` opts out, permission failures degrade gracefully). It powers the
   credential-shape rule (active keys + no console password + no MFA → machine) and user last-used.
+  `download` also pages CloudTrail `LookupEvents` for `CreateUser`/`CreateRole` (`cloudTrailEvents`
+  key; `--skip-cloudtrail-events` opts out) — true `created_by` for identities created in the
+  trailing 90 days. Each existing access key additionally becomes a child `access_key` record whose
+  `created_by` is the owning user (structural attribution that never expires), with
+  `created_at` = last rotation and the key's own last-used date.
 - **OCI** — the collector serializes `capabilities`, `isMfaActivated`, `timeCreated`,
   `lastSuccessfulLoginTime`, and `email` straight from `ListUsers` (no extra calls). MFA enrollment
   → human (it exists only for console logins), overriding the API-keys-only rule; machine-token
