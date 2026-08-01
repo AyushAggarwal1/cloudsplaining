@@ -70,9 +70,7 @@ def render_console(report: dict[str, Any], use_color: bool = True) -> str:
 
     collections = (*_IDENTITY_COLLECTIONS, *policy_collection_keys(report))
     counts = {k: len(report.get(k, {})) for k in collections}
-    lines.append(
-        "Inventory: " + ", ".join(f"{counts[k]} {k.replace('_', ' ')}" for k in collections if counts[k])
-    )
+    lines.append("Inventory: " + ", ".join(f"{counts[k]} {k.replace('_', ' ')}" for k in collections if counts[k]))
 
     flagged = _flagged_policies(report)
     if not flagged:
@@ -133,8 +131,7 @@ def render_html(report: dict[str, Any]) -> str:
         sev_counts[sev] = sev_counts.get(sev, 0) + 1
 
     cards = "".join(
-        f'<div class="card {sev}"><span class="num">{sev_counts.get(sev, 0)}</span>'
-        f'<span class="lbl">{sev}</span></div>'
+        f'<div class="card {sev}"><span class="num">{sev_counts.get(sev, 0)}</span><span class="lbl">{sev}</span></div>'
         for sev in ("critical", "high", "medium", "low")
     )
     inv = "".join(
@@ -142,9 +139,7 @@ def render_html(report: dict[str, Any]) -> str:
         f'<span class="lbl">{k.replace("_", " ")}</span></div>'
         for k in (*_IDENTITY_COLLECTIONS, *policy_collection_keys(report))
     )
-    rows = "\n".join(_html_row(c, e) for c, _pid, e in flagged) or (
-        '<tr><td colspan="5">No policy findings.</td></tr>'
-    )
+    rows = "\n".join(_html_row(c, e) for c, _pid, e in flagged) or ('<tr><td colspan="5">No policy findings.</td></tr>')
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">

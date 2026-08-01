@@ -202,9 +202,7 @@ class GcpProvider(Provider):
 
     @staticmethod
     def _flag_public(policy: Policy, member: str) -> None:
-        block = policy.categories.setdefault(
-            PUBLIC_ACCESS, {"severity": "none", "description": "", "findings": []}
-        )
+        block = policy.categories.setdefault(PUBLIC_ACCESS, {"severity": "none", "description": "", "findings": []})
         block["severity"] = "critical"
         if member not in block["findings"]:
             block["findings"].append(member)

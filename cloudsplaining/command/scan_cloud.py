@@ -20,6 +20,7 @@ from typing import Any
 import click
 
 from cloudsplaining import set_log_level
+from cloudsplaining.identity_inventory.inventory import build_identity_inventory
 from cloudsplaining.multicloud import get_provider
 from cloudsplaining.multicloud.analysis import CATEGORY_ORDER
 from cloudsplaining.multicloud.provider import SUPPORTED_PROVIDERS
@@ -91,6 +92,10 @@ def scan_cloud(
     # Build the full AWS-shaped report, then optionally prune category findings
     # below the requested severities.
     report = render(model)
+    if isinstance(data, dict):
+        # The snapshot doubles as the identity-lifecycle source; statement-list
+        # inputs (OCI paste mode) carry no identities to inventory.
+        report["identity_inventory"] = build_identity_inventory(provider_name, data)
     wanted = {s.lower() for s in severity}
     if wanted:
         _filter_severities(report, wanted)

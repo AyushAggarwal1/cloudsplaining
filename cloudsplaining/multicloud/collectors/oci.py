@@ -97,9 +97,7 @@ class OciCollector(Collector):
                 )
         return out
 
-    def _memberships(
-        self, client: Any, tenancy: str, users: list[Any], groups: list[Any]
-    ) -> dict[str, list[str]]:
+    def _memberships(self, client: Any, tenancy: str, users: list[Any], groups: list[Any]) -> dict[str, list[str]]:
         user_name = {u.id: u.name for u in users}
         memberships: dict[str, list[str]] = {}
         for group in groups:
@@ -128,8 +126,32 @@ class OciCollector(Collector):
 
     @staticmethod
     def _user(obj: Any) -> dict[str, Any]:
-        return {"id": obj.id, "name": obj.name, "description": getattr(obj, "description", None)}
+        # ListUsers already returns the lifecycle/classification fields the
+        # identity inventory consumes — no extra API calls needed.
+        capabilities = getattr(obj, "capabilities", None)
+        return {
+            "id": obj.id,
+            "name": obj.name,
+            "description": getattr(obj, "description", None),
+            "email": getattr(obj, "email", None),
+            "timeCreated": getattr(obj, "time_created", None),
+            "lastSuccessfulLoginTime": getattr(obj, "last_successful_login_time", None),
+            "isMfaActivated": getattr(obj, "is_mfa_activated", None),
+            "capabilities": (
+                {
+                    "canUseConsolePassword": getattr(capabilities, "can_use_console_password", None),
+                    "canUseApiKeys": getattr(capabilities, "can_use_api_keys", None),
+                }
+                if capabilities is not None
+                else None
+            ),
+        }
 
     @staticmethod
     def _dynamic_group(obj: Any) -> dict[str, Any]:
-        return {"id": obj.id, "name": obj.name, "matching-rule": getattr(obj, "matching_rule", None)}
+        return {
+            "id": obj.id,
+            "name": obj.name,
+            "matching-rule": getattr(obj, "matching_rule", None),
+            "timeCreated": getattr(obj, "time_created", None),
+        }

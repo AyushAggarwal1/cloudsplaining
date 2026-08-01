@@ -23,7 +23,9 @@ class TestGcpEngine(unittest.TestCase):
     def test_predefined_role_goes_to_managed(self):
         model = self.provider.scan(
             {
-                "predefinedRoles": [{"name": "roles/owner", "includedPermissions": ["resourcemanager.projects.setIamPolicy"]}],
+                "predefinedRoles": [
+                    {"name": "roles/owner", "includedPermissions": ["resourcemanager.projects.setIamPolicy"]}
+                ],
                 "bindings": [{"role": "roles/owner", "members": ["user:a@b.com"], "resource": "projects/p"}],
             }
         )
@@ -31,7 +33,11 @@ class TestGcpEngine(unittest.TestCase):
 
     def test_public_member_flagged_and_attached(self):
         model = self.provider.scan(
-            {"bindings": [{"role": "roles/storage.objectViewer", "members": ["allUsers"], "resource": "projects/p/buckets/x"}]}
+            {
+                "bindings": [
+                    {"role": "roles/storage.objectViewer", "members": ["allUsers"], "resource": "projects/p/buckets/x"}
+                ]
+            }
         )
         policy = model.policies["roles/storage.objectViewer"]
         self.assertEqual(_cat(policy, "PublicAccess")["severity"], "critical")
@@ -40,7 +46,11 @@ class TestGcpEngine(unittest.TestCase):
         model = self.provider.scan(
             {
                 "bindings": [
-                    {"role": "roles/viewer", "members": ["user:a@b.com", "group:g@b.com", "serviceAccount:sa@p.iam.gserviceaccount.com"], "resource": "projects/p"}
+                    {
+                        "role": "roles/viewer",
+                        "members": ["user:a@b.com", "group:g@b.com", "serviceAccount:sa@p.iam.gserviceaccount.com"],
+                        "resource": "projects/p",
+                    }
                 ]
             }
         )
@@ -53,9 +63,15 @@ class TestGcpEngine(unittest.TestCase):
     def test_service_account_has_service_account_provider_kind(self):
         model = self.provider.scan(
             {
-                "serviceAccounts": [{"email": "my-sa@proj.iam.gserviceaccount.com", "uniqueId": "123", "displayName": "My SA"}],
+                "serviceAccounts": [
+                    {"email": "my-sa@proj.iam.gserviceaccount.com", "uniqueId": "123", "displayName": "My SA"}
+                ],
                 "bindings": [
-                    {"role": "roles/storage.admin", "members": ["serviceAccount:my-sa@proj.iam.gserviceaccount.com"], "resource": "projects/p"}
+                    {
+                        "role": "roles/storage.admin",
+                        "members": ["serviceAccount:my-sa@proj.iam.gserviceaccount.com"],
+                        "resource": "projects/p",
+                    }
                 ],
             }
         )

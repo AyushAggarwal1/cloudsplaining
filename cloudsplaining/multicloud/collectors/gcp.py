@@ -116,6 +116,10 @@ class GcpCollector(Collector):
                 logger.warning("Could not expand predefined role %s: %s", role_name, error)
                 continue
             out.append(
-                {"name": role.get("name"), "title": role.get("title"), "includedPermissions": role.get("includedPermissions", [])}
+                {
+                    "name": role.get("name"),
+                    "title": role.get("title"),
+                    "includedPermissions": role.get("includedPermissions", []),
+                }
             )
         return out

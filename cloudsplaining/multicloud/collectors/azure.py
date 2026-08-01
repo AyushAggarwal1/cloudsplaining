@@ -2,7 +2,9 @@
 
 Pulls role definitions + assignments from the Authorization management plane and
 users/groups/service-principals from Microsoft Graph, returning the snapshot dict
-the Azure engine consumes.
+the Azure engine consumes. Identity-inventory enrichments ride along best-effort:
+directory audit entries for created_by (AuditLog.Read.All) and service-principal
+sign-in activity for last_used (Reports.Read.All, Graph beta).
 
 Requires ``pip install 'cloudsplaining[azure]'`` (azure-identity,
 azure-mgmt-authorization, requests). Authentication uses ``DefaultAzureCredential``
@@ -25,6 +27,20 @@ logger = logging.getLogger(__name__)
 
 _GRAPH = "https://graph.microsoft.com/v1.0"
 _GRAPH_SCOPE = "https://graph.microsoft.com/.default"
+
+_USER_SELECT = "id,userPrincipalName,displayName,accountEnabled,userType,createdDateTime"
+# signInActivity powers last-used data but needs AuditLog.Read.All and an Entra
+# ID P1/P2 tenant; the collector falls back to _USER_SELECT when it is rejected.
+_USER_SELECT_WITH_SIGN_INS = _USER_SELECT + ",signInActivity"
+_SP_SELECT = "id,appId,displayName,servicePrincipalType,accountEnabled,createdDateTime"
+
+# created_by attribution (needs AuditLog.Read.All; ~30-day retention).
+_DIRECTORY_AUDITS_PATH = (
+    "/auditLogs/directoryAudits?$filter="
+    "activityDisplayName eq 'Add user' or activityDisplayName eq 'Add service principal'"
+)
+# Service-principal last-used (needs Reports.Read.All; beta-only endpoint).
+_SP_SIGN_INS_URL = "https://graph.microsoft.com/beta/reports/servicePrincipalSignInActivities"
 
 
 class AzureCollector(Collector):
@@ -51,6 +67,8 @@ class AzureCollector(Collector):
             "groups": [],
             "servicePrincipals": [],
             "groupMemberships": {},
+            "directoryAudits": [],
+            "servicePrincipalSignInActivities": [],
         }
         # Microsoft Graph is best-effort: a credential without Directory.Read.All
         # still yields a useful role-based report.
@@ -109,11 +127,11 @@ class AzureCollector(Collector):
     # ------------------------------------------------------------------- Graph
     def _collect_graph(self, snapshot: dict[str, Any]) -> None:
         token = self.credential().get_token(_GRAPH_SCOPE).token
-        snapshot["users"] = self._graph_list(token, "/users?$select=id,userPrincipalName,displayName,accountEnabled")
+        snapshot["users"] = self._graph_users(token)
         snapshot["groups"] = self._graph_list(token, "/groups?$select=id,displayName")
-        snapshot["servicePrincipals"] = self._graph_list(
-            token, "/servicePrincipals?$select=id,appId,displayName,servicePrincipalType"
-        )
+        snapshot["servicePrincipals"] = self._graph_list(token, f"/servicePrincipals?$select={_SP_SELECT}")
+        snapshot["directoryAudits"] = self._best_effort_list(token, _DIRECTORY_AUDITS_PATH)
+        snapshot["servicePrincipalSignInActivities"] = self._best_effort_list(token, _SP_SIGN_INS_URL)
         memberships: dict[str, list[str]] = {}
         for group in snapshot["groups"]:
             gid = group["id"]
@@ -121,10 +139,27 @@ class AzureCollector(Collector):
             memberships[gid] = [m["id"] for m in members if "id" in m]
         snapshot["groupMemberships"] = memberships
 
+    def _graph_users(self, token: str) -> list[dict[str, Any]]:
+        try:
+            return self._graph_list(token, f"/users?$select={_USER_SELECT_WITH_SIGN_INS}")
+        except Exception as error:
+            logger.warning(
+                "signInActivity unavailable (needs AuditLog.Read.All and Entra ID P1/P2); retrying without it: %s",
+                error,
+            )
+            return self._graph_list(token, f"/users?$select={_USER_SELECT}")
+
+    def _best_effort_list(self, token: str, path: str) -> list[dict[str, Any]]:
+        try:
+            return self._graph_list(token, path)
+        except Exception as error:
+            logger.warning("Skipping %s (needs audit-log/report permissions): %s", path, error)
+            return []
+
     def _graph_list(self, token: str, path: str) -> list[dict[str, Any]]:
         requests = self._import("requests")
         headers = {"Authorization": f"Bearer {token}"}
-        url = f"{_GRAPH}{path}"
+        url = path if path.startswith("https://") else f"{_GRAPH}{path}"
         results: list[dict[str, Any]] = []
         while url:
             resp = requests.get(url, headers=headers, timeout=30)

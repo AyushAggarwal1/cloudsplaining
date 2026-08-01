@@ -32,6 +32,10 @@ AUTHORIZATION_DETAILS_SCHEMA = Schema(
         "GroupDetailList": [object],
         "RoleDetailList": [object],
         "Policies": [object],
+        # Identity-inventory enrichment written by `download` or added manually
+        # (see cloudsplaining/identity_inventory/aws.py for the formats).
+        Optional("credentialReport"): object,
+        Optional("cloudTrailEvents"): [object],
     }
 )
 

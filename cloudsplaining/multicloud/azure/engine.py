@@ -177,9 +177,7 @@ class AzureProvider(Provider):
     ) -> None:
         for assignment in snapshot.get("roleAssignments", []) or []:
             role_ref = (
-                assignment.get("roleDefinitionId")
-                or assignment.get("roleDefinitionName")
-                or assignment.get("roleName")
+                assignment.get("roleDefinitionId") or assignment.get("roleDefinitionName") or assignment.get("roleName")
             )
             policy = self._resolve_policy(role_ref, role_def_index, model)
             if policy is None:

@@ -54,7 +54,12 @@ class TestOciEngine(unittest.TestCase):
         model = self.provider.scan(
             {
                 "dynamicGroups": [{"id": "dg1", "name": "Instances"}],
-                "policies": [{"name": "p", "statements": ["Allow dynamic-group Instances to use instance-family in compartment c"]}],
+                "policies": [
+                    {
+                        "name": "p",
+                        "statements": ["Allow dynamic-group Instances to use instance-family in compartment c"],
+                    }
+                ],
             }
         )
         self.assertIsNotNone(model.get_principal(ROLE, "dg1"))

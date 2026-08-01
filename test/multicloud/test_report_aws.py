@@ -40,7 +40,11 @@ class TestReportAws(unittest.TestCase):
 
     def test_privilege_escalation_uses_type_actions_shape(self):
         model = GcpProvider().scan(
-            {"customRoles": [{"name": "projects/p/roles/r", "includedPermissions": ["resourcemanager.projects.setIamPolicy"]}]}
+            {
+                "customRoles": [
+                    {"name": "projects/p/roles/r", "includedPermissions": ["resourcemanager.projects.setIamPolicy"]}
+                ]
+            }
         )
         report = render(model)
         pe = report["customer_managed_policies"]["projects/p/roles/r"]["PrivilegeEscalation"]
@@ -51,7 +55,9 @@ class TestReportAws(unittest.TestCase):
     def test_identity_entry_references_policies(self):
         model = GcpProvider().scan(
             {
-                "predefinedRoles": [{"name": "roles/owner", "includedPermissions": ["resourcemanager.projects.setIamPolicy"]}],
+                "predefinedRoles": [
+                    {"name": "roles/owner", "includedPermissions": ["resourcemanager.projects.setIamPolicy"]}
+                ],
                 "bindings": [{"role": "roles/owner", "members": ["user:a@b.com"]}],
             }
         )

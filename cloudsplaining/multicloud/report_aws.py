@@ -94,9 +94,7 @@ def _policy_entry(policy: Policy, exclusions: Exclusions) -> dict[str, Any]:
     }
     entry.update(policy.metadata)
     for category in CATEGORY_ORDER:
-        entry[category] = policy.categories.get(
-            category, {"severity": "none", "description": "", "findings": []}
-        )
+        entry[category] = policy.categories.get(category, {"severity": "none", "description": "", "findings": []})
     entry["is_excluded"] = _is_excluded(policy.name, "policy", exclusions)
     return entry
 
