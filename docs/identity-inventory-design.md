@@ -6,7 +6,9 @@
 
 For every identity in AWS, Azure, GCP, and OCI (Oracle), produce a normalized record with:
 
-1. `classification` — `machine` or `human`
+1. `classification` — `machine`, `human`, or `unknown` (never a silent guess), with a
+   `classification_reason` stating the evidence (see the vocabulary below and
+   `identity-classification-design.md`)
 2. `created_at`
 3. `age_days`
 4. `days_since_last_used`
@@ -61,30 +63,46 @@ and snake_case (OCI CLI emits kebab-case; SDKs emit snake_case; REST APIs camelC
 
 ## Identity types and classification rules
 
-| Provider | Identity types | machine when | human when |
-|---|---|---|---|
-| aws | `user`, `role` | role (default); service-linked/service-role path; user whose name matches machine tokens; user with active access keys but no console password and no MFA (credential report) | user (default); role whose trust policy is SAML-federated (SSO) |
-| azure | `user`, `service_principal` | any service principal (Application, ManagedIdentity, Legacy); user with machine-token name | user (default) |
-| gcp | `user`, `service_account` | every service account; user with machine-token name | user (default: Workspace export or `user:` binding member) |
-| oci | `user`, `dynamic_group` | dynamic group (workload identity); user with API keys but no console password (`capabilities`); machine-token name | user (default) |
+Every builder feeds ordered evidence into a shared first-signal-wins resolver
+(`classify.resolve`): hard structure → machine-name → credential/activity shape → `unknown`.
+No evidence means `unknown`, never a guess.
+
+| Provider | Identity types | machine when | human when | unknown when |
+|---|---|---|---|---|
+| aws | `user`, `role`, `access_key` | role (workload default); service-role path; access-key records; machine-token name; active access keys + no console password/MFA (live supplement, credential report, or CloudTrail credential events) | console password or MFA; SAML-federated role trust | no credential report available; user created after the cached report was generated with no supplement/events; report row with zero credentials |
+| azure | `user`, `service_principal` | any service principal; machine-token or sync-account name; only non-interactive sign-ins | interactive sign-ins; soft default with reason when the tenant has no sign-in data (no `AuditLog.Read.All`/P1) | sign-in data available but the user never signed in |
+| gcp | `user`, `service_account` | every service account; machine-token name; `user:` member with a `*.gserviceaccount.com` domain | Workspace directory user; `user:` binding member | — (member types are structural) |
+| oci | `user`, `dynamic_group` | dynamic group; machine-token name; API keys + console password disabled (classic `capabilities` or the Identity Domains SCIM capabilities extension) | MFA enrolled; console login recorded; console-capable (soft default, stated in the reason) | no capability or activity evidence |
 
 **API-backed signals (fetched automatically):**
 
-- **AWS** — `download` now generates and embeds the IAM credential report (`credentialReport` key;
-  `--skip-credential-report` opts out, permission failures degrade gracefully). It powers the
-  credential-shape rule (active keys + no console password + no MFA → machine) and user last-used.
-  `download` also pages CloudTrail `LookupEvents` for `CreateUser`/`CreateRole` (`cloudTrailEvents`
-  key; `--skip-cloudtrail-events` opts out) — true `created_by` for identities created in the
-  trailing 90 days. Each existing access key additionally becomes a child `access_key` record whose
-  `created_by` is the owning user (structural attribution that never expires), with
-  `created_at` = last rotation and the key's own last-used date.
+- **AWS** — `download` generates and embeds the IAM credential report (`credentialReport` key plus
+  `credentialReportGeneratedTime`; `--skip-credential-report` opts out, permission failures degrade
+  gracefully). It powers the credential-shape rule and user last-used. AWS serves a **cached**
+  report for up to four hours, so users created after generation have no row; for them `download`
+  performs live per-user lookups (`iam:ListAccessKeys` / `iam:GetLoginProfile` /
+  `iam:ListMFADevices`, all inside `SecurityAudit`) stored under `credentialSupplement`.
+  `download` also pages CloudTrail `LookupEvents` for
+  `CreateUser`/`CreateRole`/`CreateAccessKey`/`CreateLoginProfile` (`cloudTrailEvents` key;
+  `--skip-cloudtrail-events` opts out) — `created_by` attribution plus credential-shape
+  corroboration for report-gap users. Each existing access key additionally becomes a child
+  `access_key` record whose `created_by` is the owning user (structural attribution that never
+  expires), with `created_at` = last rotation and the key's own last-used date.
 - **OCI** — the collector serializes `capabilities`, `isMfaActivated`, `timeCreated`,
-  `lastSuccessfulLoginTime`, and `email` straight from `ListUsers` (no extra calls). MFA enrollment
-  → human (it exists only for console logins), overriding the API-keys-only rule; machine-token
-  names override both.
+  `lastSuccessfulLoginTime`, and `email` straight from `ListUsers` (no extra calls). Identity
+  Domains (SCIM) users carry capabilities in the
+  `urn:ietf:params:scim:schemas:oracle:idcs:extension:capabilities:User` extension, which is read
+  too. Precedence: machine-token name → MFA enrolled (current human state) → API-key-only
+  capabilities (current machine shape — deliberately above historical logins, which survive
+  conversion to a service account) → console login recorded → console-capable soft default →
+  `unknown`.
 - **Azure** — the collector requests `createdDateTime`, `userType`, `accountEnabled`, and
   `signInActivity` for users (falling back without `signInActivity` when the tenant lacks
-  `AuditLog.Read.All` / Entra ID P1) and `createdDateTime` for service principals.
+  `AuditLog.Read.All` / Entra ID P1) and `createdDateTime` for service principals. Interactive
+  sign-ins → human; only non-interactive → machine; never signed in (with data available) →
+  `unknown`; no sign-in data tenant-wide → soft human default with the reason stating so.
+  Well-known AD Connect sync accounts (`Sync_*` UPNs, the on-premises directory synchronization
+  display name) → machine.
 - **GCP** — the service-account vs. user split from the IAM API is already the authoritative
   classification signal. Human users' lifecycle comes from Admin Activity audit logs
   (`auditLogEntries`): their newest logged activity → `last_used`, and the first `SetIamPolicy`
@@ -94,11 +112,22 @@ and snake_case (OCI CLI emits kebab-case; SDKs emit snake_case; REST APIs camelC
   `lastLoginTime` merged into `last_used`).
 
 Name heuristic (`classify.py`): a name is machine-like when a token such as `svc`, `service`, `bot`,
-`ci`, `cicd`, `deploy`, `automation`, `jenkins`, `terraform`, `github`, `pipeline`, `lambda`,
-`backup`, `agent`, ... appears delimited by `-`/`_`/`.`/digits or string edges — so `svc-deployer`
-and `backup_agent` match, but `apparna` and `robotics-team-lead` style substrings do not.
-Classification is always binary (`machine`/`human`) per the requirement; defaults are the
-structural rules above.
+`ci`, `ciem`, `cicd`, `cspm`, `cnapp`, `siem`, `deploy`, `devops`, `automation`, `jenkins`,
+`terraform`, `github`, `pipeline`, `lambda`, `backup`, `agent`, `collector`, `exporter`, `ingest`,
+`noreply`, `smtp`, ... appears delimited by `-`/`_`/`.`/digits or string edges — so `svc-deployer`
+and `backup_agent` match, but `apparna` and `robotics-team-lead` style substrings do not. Email
+names whose domain marks a workload (`*.gserviceaccount.com`) are machines regardless of local part.
+
+### Classification reason vocabulary
+
+Every record carries `classification_reason` — a stable string the platform may match on
+(changes are additive). The full vocabulary:
+
+| classification | reasons |
+|---|---|
+| machine | `automation-style name (token: <token>)` · `workload email domain (gserviceaccount.com)` · `active access keys, no console password (credential report)` / `(live IAM lookup)` · `access key created, no console password (CloudTrail events)` · `access key` · `AWS service role` · `workload role` · `service principal` · `directory synchronization account` · `non-interactive sign-ins only` · `service account` · `workload identity` · `API-key-only capabilities` |
+| human | `console password or MFA (credential report)` / `(live IAM lookup)` · `console login profile created (CloudTrail events)` · `SAML-federated role` · `interactive sign-ins` · `Entra user (sign-in data unavailable)` (soft default) · `Workspace directory user` · `user: IAM binding member` · `MFA enrolled` · `console login recorded` · `console-capable (default)` (soft default) |
+| unknown | `no credential evidence: credential report unavailable` · `created after credential report was generated` · `no credentials provisioned (credential report)` / `(live IAM lookup)` · `never signed in` · `no capability or activity evidence` |
 
 ## Per-cloud field sources
 

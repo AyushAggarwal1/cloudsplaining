@@ -29,7 +29,8 @@ class TestCli(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         rows = json.loads(result.output)
         self.assertEqual(rows[0]["name"], "alice")
-        self.assertEqual(rows[0]["classification"], "human")
+        # No credential report in AWS_DATA → honest unknown, not a silent human guess.
+        self.assertEqual(rows[0]["classification"], "unknown")
 
     def test_reference_time_makes_age_deterministic(self):
         result = self._invoke(
@@ -45,7 +46,9 @@ class TestCli(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         content = out.read_text()
-        self.assertTrue(content.startswith("provider,identity_type,id,name,classification,created_at"))
+        self.assertTrue(
+            content.startswith("provider,identity_type,id,name,classification,classification_reason,created_at")
+        )
         self.assertIn("alice", content)
 
     def test_oracle_alias_accepted(self):

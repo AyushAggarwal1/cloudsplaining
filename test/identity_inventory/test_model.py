@@ -11,6 +11,7 @@ EXPECTED_KEYS = [
     "id",
     "name",
     "classification",
+    "classification_reason",
     "created_at",
     "age_days",
     "days_since_last_used",
@@ -64,6 +65,31 @@ class TestIdentityRecord(unittest.TestCase):
     def test_classification_constants(self):
         self.assertEqual(HUMAN, "human")
         self.assertEqual(MACHINE, "machine")
+
+
+class TestClassificationReason(unittest.TestCase):
+    def test_unknown_constant_exists(self):
+        from cloudsplaining.identity_inventory.model import UNKNOWN
+
+        self.assertEqual(UNKNOWN, "unknown")
+
+    def test_classification_reason_defaults_to_none_and_serializes(self):
+        record = IdentityRecord(provider="aws", identity_type="user", id="arn:x", name="x", classification=HUMAN)
+        self.assertIsNone(record.classification_reason)
+        self.assertIn("classification_reason", record.to_dict(reference_time=REF))
+
+    def test_classification_reason_round_trips(self):
+        record = IdentityRecord(
+            provider="aws",
+            identity_type="user",
+            id="arn:x",
+            name="x",
+            classification="unknown",
+            classification_reason="no credential evidence: credential report unavailable",
+        )
+        data = record.to_dict(reference_time=REF)
+        self.assertEqual(data["classification"], "unknown")
+        self.assertEqual(data["classification_reason"], "no credential evidence: credential report unavailable")
 
 
 if __name__ == "__main__":

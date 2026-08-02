@@ -21,35 +21,45 @@ from __future__ import annotations
 
 from typing import Any
 
-from cloudsplaining.identity_inventory.classify import is_machine_name
-from cloudsplaining.identity_inventory.model import HUMAN, MACHINE, IdentityRecord
+from cloudsplaining.identity_inventory.classify import machine_name_signal, resolve
+from cloudsplaining.identity_inventory.model import HUMAN, MACHINE, UNKNOWN, IdentityRecord
 from cloudsplaining.identity_inventory.parsing import get_field, max_timestamp, parse_timestamp
 
 PROVIDER = "azure"
 
 _CREATION_ACTIVITIES = ("Add user", "Add service principal")
 
+_SYNC_UPN_PREFIX = "sync_"
+_SYNC_DISPLAY_NAME = "on-premises directory synchronization service account"
+
 
 def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
     """Inventory every user and service principal (groups are memberships, not identities)."""
     creators = _audit_creators(data.get("directoryAudits") or [])
     sp_sign_ins = _sp_sign_ins(data.get("servicePrincipalSignInActivities") or [])
-    records = [_user_record(user, creators) for user in data.get("users") or []]
+    users = data.get("users") or []
+    sign_in_available = _sign_in_available(users)
+    records = [_user_record(user, creators, sign_in_available) for user in users]
     records += [_sp_record(sp, creators, sp_sign_ins) for sp in data.get("servicePrincipals") or []]
     return records
 
 
-def _user_record(user: dict[str, Any], creators: dict[str, str]) -> IdentityRecord:
+def _sign_in_available(users: list[dict[str, Any]]) -> bool:
+    """Whether the snapshot carries sign-in activity at all (needs AuditLog.Read.All + Entra P1)."""
+    return any(get_field(user, "signInActivity") for user in users)
+
+
+def _user_record(user: dict[str, Any], creators: dict[str, str], sign_in_available: bool) -> IdentityRecord:
     name = get_field(user, "userPrincipalName") or get_field(user, "displayName") or ""
-    display_name = get_field(user, "displayName")
     sign_in = get_field(user, "signInActivity") or {}
-    machine = is_machine_name(name) or is_machine_name(display_name)
+    classification, reason = _user_classification(user, sign_in_available)
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="user",
         id=user.get("id") or name,
         name=name,
-        classification=MACHINE if machine else HUMAN,
+        classification=classification,
+        classification_reason=reason,
         created_at=parse_timestamp(get_field(user, "createdDateTime")),
         last_used=max_timestamp(
             get_field(sign_in, "lastSignInDateTime"),
@@ -58,6 +68,38 @@ def _user_record(user: dict[str, Any], creators: dict[str, str]) -> IdentityReco
         ),
         created_by=_creator_for(user, creators),
     )
+
+
+def _user_classification(user: dict[str, Any], sign_in_available: bool) -> tuple[str, str]:
+    """Sync-account names → machine names → sign-in shape; soft human only without sign-in data."""
+    name = get_field(user, "userPrincipalName") or get_field(user, "displayName") or ""
+    display_name = get_field(user, "displayName")
+    return resolve(
+        _sync_account_signal(name, display_name),
+        machine_name_signal(name, display_name),
+        _sign_in_signal(get_field(user, "signInActivity") or {}, sign_in_available),
+        fallback="no sign-in evidence",
+    )
+
+
+def _sync_account_signal(name: str, display_name: str | None) -> tuple[str, str] | None:
+    if name.lower().startswith(_SYNC_UPN_PREFIX) or (display_name or "").lower() == _SYNC_DISPLAY_NAME:
+        return (MACHINE, "directory synchronization account")
+    return None
+
+
+def _sign_in_signal(sign_in: dict[str, Any], available: bool) -> tuple[str, str] | None:
+    """Interactive sign-ins are a human act; only-non-interactive is credential automation."""
+    interactive = get_field(sign_in, "lastSignInDateTime") or get_field(sign_in, "lastSuccessfulSignInDateTime")
+    if interactive:
+        return (HUMAN, "interactive sign-ins")
+    if get_field(sign_in, "lastNonInteractiveSignInDateTime"):
+        return (MACHINE, "non-interactive sign-ins only")
+    if available:
+        return (UNKNOWN, "never signed in")
+    # An Entra user object is a people-directory entry by construction; without any
+    # sign-in data in the tenant the honest best guess stays human — stated, not silent.
+    return (HUMAN, "Entra user (sign-in data unavailable)")
 
 
 def _sp_record(sp: dict[str, Any], creators: dict[str, str], sp_sign_ins: dict[str, Any]) -> IdentityRecord:
@@ -70,6 +112,7 @@ def _sp_record(sp: dict[str, Any], creators: dict[str, str], sp_sign_ins: dict[s
         name=name,
         # Applications, managed identities, and legacy SPs are all workloads.
         classification=MACHINE,
+        classification_reason="service principal",
         created_at=parse_timestamp(get_field(sp, "createdDateTime")),
         last_used=max_timestamp(
             get_field(sign_in, "lastSignInDateTime"),

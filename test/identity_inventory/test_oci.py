@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from cloudsplaining.identity_inventory.model import HUMAN, MACHINE
+from cloudsplaining.identity_inventory.model import HUMAN, MACHINE, UNKNOWN
 from cloudsplaining.identity_inventory.oci import build_inventory
 
 USER_STATE_EXT = "urn:ietf:params:scim:schemas:oracle:idcs:extension:userState:User"
@@ -107,6 +107,82 @@ class TestOciInventory(unittest.TestCase):
             }
         ]
         self.assertEqual(_by_name(build_inventory(data), "maria@corp.com").created_by, "admin@corp.com")
+
+
+class TestOciClassificationSignals(unittest.TestCase):
+    def _record(self, user):
+        return next(r for r in build_inventory({"users": [user]}) if r.identity_type == "user")
+
+    def test_scim_capabilities_api_keys_only_is_machine(self):
+        record = self._record(
+            {
+                "id": "ocid1.user.oc1..a",
+                "userName": "quiet-account",
+                "urn:ietf:params:scim:schemas:oracle:idcs:extension:capabilities:User": {
+                    "canUseConsolePassword": False,
+                    "canUseApiKeys": True,
+                },
+            }
+        )
+        self.assertEqual(record.classification, MACHINE)
+        self.assertEqual(record.classification_reason, "API-key-only capabilities")
+
+    def test_console_capable_is_soft_human(self):
+        record = self._record(
+            {
+                "id": "ocid1.user.oc1..b",
+                "userName": "quiet-account",
+                "capabilities": {"canUseConsolePassword": True, "canUseApiKeys": True},
+            }
+        )
+        self.assertEqual(record.classification, HUMAN)
+        self.assertEqual(record.classification_reason, "console-capable (default)")
+
+    def test_mfa_beats_capabilities(self):
+        record = self._record(
+            {
+                "id": "ocid1.user.oc1..c",
+                "userName": "quiet-account",
+                "isMfaActivated": True,
+                "capabilities": {"canUseConsolePassword": False, "canUseApiKeys": True},
+            }
+        )
+        self.assertEqual(record.classification, HUMAN)
+        self.assertEqual(record.classification_reason, "MFA enrolled")
+
+    def test_login_activity_is_human(self):
+        record = self._record(
+            {
+                "id": "ocid1.user.oc1..d",
+                "userName": "quiet-account",
+                "lastSuccessfulLoginTime": "2026-07-01T00:00:00Z",
+            }
+        )
+        self.assertEqual(record.classification, HUMAN)
+        self.assertEqual(record.classification_reason, "console login recorded")
+
+    def test_current_api_key_only_shape_beats_historical_login(self):
+        # An account converted to a service user keeps its old login timestamp;
+        # its current capability shape is what it is now.
+        record = self._record(
+            {
+                "id": "ocid1.user.oc1..f",
+                "userName": "quiet-account",
+                "lastSuccessfulLoginTime": "2024-01-01T00:00:00Z",
+                "capabilities": {"canUseConsolePassword": False, "canUseApiKeys": True},
+            }
+        )
+        self.assertEqual(record.classification, MACHINE)
+        self.assertEqual(record.classification_reason, "API-key-only capabilities")
+
+    def test_no_evidence_is_unknown(self):
+        record = self._record({"id": "ocid1.user.oc1..e", "userName": "quiet-account"})
+        self.assertEqual(record.classification, UNKNOWN)
+        self.assertEqual(record.classification_reason, "no capability or activity evidence")
+
+    def test_dynamic_group_reason(self):
+        records = build_inventory({"dynamicGroups": [{"id": "ocid1.dg.oc1..x", "name": "workers"}]})
+        self.assertEqual(records[0].classification_reason, "workload identity")
 
 
 if __name__ == "__main__":

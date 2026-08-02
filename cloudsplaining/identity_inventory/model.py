@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 HUMAN = "human"
 MACHINE = "machine"
+UNKNOWN = "unknown"
 
 
 @dataclass
@@ -31,7 +32,8 @@ class IdentityRecord:
     identity_type: str  # user | role | access_key | service_principal | service_account | dynamic_group
     id: str
     name: str
-    classification: str  # HUMAN | MACHINE
+    classification: str  # HUMAN | MACHINE | UNKNOWN
+    classification_reason: str | None = None
     created_at: datetime | None = None
     last_used: datetime | None = None
     created_by: str | None = None
@@ -45,6 +47,7 @@ class IdentityRecord:
             "id": self.id,
             "name": self.name,
             "classification": self.classification,
+            "classification_reason": self.classification_reason,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "age_days": days_since(self.created_at, reference),
             "days_since_last_used": days_since(self.last_used, reference),

@@ -29,7 +29,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from cloudsplaining.identity_inventory.classify import is_machine_name
+from cloudsplaining.identity_inventory.classify import machine_name_signal
 from cloudsplaining.identity_inventory.model import HUMAN, MACHINE, IdentityRecord
 from cloudsplaining.identity_inventory.parsing import get_field, max_timestamp, parse_timestamp
 
@@ -82,6 +82,7 @@ def _sa_record(
         id=get_field(sa, "uniqueId") or email,
         name=email,
         classification=MACHINE,
+        classification_reason="service account",
         created_at=parse_timestamp(get_field(sa, "createTime")) or parse_timestamp(audit_time),
         last_used=parse_timestamp(activities.get(email)),
         created_by=audit_actor,
@@ -129,12 +130,14 @@ def _user_record(
     if last_login == _EPOCH:
         last_login = None
     grant_time, grant_actor = user_grants.get(email, (None, None))
+    classification, reason = machine_name_signal(email) or (HUMAN, "Workspace directory user")
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="user",
         id=user.get("id") or email,
         name=email,
-        classification=MACHINE if is_machine_name(email) else HUMAN,
+        classification=classification,
+        classification_reason=reason,
         # The Workspace directory creationTime is authoritative; the first
         # SetIamPolicy grant is only a proxy for when the user entered GCP.
         created_at=parse_timestamp(get_field(user, "creationTime")) or grant_time,
@@ -149,12 +152,14 @@ def _member_user_record(
     user_grants: dict[str, tuple[datetime, str | None]],
 ) -> IdentityRecord:
     grant_time, grant_actor = user_grants.get(email, (None, None))
+    classification, reason = machine_name_signal(email) or (HUMAN, "user: IAM binding member")
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="user",
         id=email,
         name=email,
-        classification=MACHINE if is_machine_name(email) else HUMAN,
+        classification=classification,
+        classification_reason=reason,
         created_at=grant_time,
         last_used=user_activity.get(email),
         created_by=grant_actor,

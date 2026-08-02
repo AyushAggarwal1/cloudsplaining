@@ -13,10 +13,11 @@ See [identity-inventory-design.md](identity-inventory-design.md) for how each fi
 | Permission | What it powers | If missing |
 |---|---|---|
 | `iam:GetAccountAuthorizationDetails` | **Core** — users, roles, `created_at`, role `last_used`, SSO/service-linked classification | download fails (required) |
-| `iam:GenerateCredentialReport` + `iam:GetCredentialReport` | Credential-shape classification (console password / MFA / active access keys → machine), user `last_used`, access-key child rows | classification falls back to name heuristics; user `last_used` null; no access-key rows (`--skip-credential-report` opts out explicitly) |
-| `cloudtrail:LookupEvents` | `created_by` for users/roles created in the last 90 days | `created_by` null except access keys, whose structural attribution to the owning user needs no extra permission (`--skip-cloudtrail-events` opts out explicitly) |
+| `iam:GenerateCredentialReport` + `iam:GetCredentialReport` | Credential-shape classification (console password / MFA / active access keys → machine), user `last_used`, access-key child rows, `credentialReportGeneratedTime` | neutral-named users classify `unknown` (`no credential evidence: credential report unavailable`); user `last_used` null; no access-key rows (`--skip-credential-report` opts out explicitly) |
+| `iam:ListAccessKeys` + `iam:GetLoginProfile` + `iam:ListMFADevices` | `credentialSupplement` — live classification of users created **after** the cached credential report was generated (AWS caches it up to 4 hours and regeneration cannot be forced) | such users classify from CloudTrail credential events, else `unknown` (`created after credential report was generated`) |
+| `cloudtrail:LookupEvents` | `created_by` for users/roles created in the last 90 days; `CreateAccessKey`/`CreateLoginProfile` events corroborate credential shape for report-gap users | `created_by` null except access keys, whose structural attribution to the owning user needs no extra permission (`--skip-cloudtrail-events` opts out explicitly) |
 
-A read-only role with the AWS-managed `SecurityAudit` policy covers all three.
+A read-only role with the AWS-managed `SecurityAudit` policy covers all of the above.
 
 ## Azure (`AzureCollector`)
 
@@ -24,7 +25,7 @@ A read-only role with the AWS-managed `SecurityAudit` policy covers all three.
 |---|---|---|
 | **Reader** role on the subscription (ARM) | **Core** — role definitions + assignments | collect fails |
 | Graph `Directory.Read.All` | users, groups, service principals, `created_at`, classification | identity list empty (logged warning; role-based report still produced) |
-| Graph `AuditLog.Read.All` **+ Entra ID P1/P2 license** | user `signInActivity` → `last_used` | collector auto-retries without `signInActivity`; user `last_used` null |
+| Graph `AuditLog.Read.All` **+ Entra ID P1/P2 license** | user `signInActivity` → `last_used` **and** sign-in-shape classification (interactive → human, non-interactive-only → machine, never → `unknown`) | collector auto-retries without `signInActivity`; user `last_used` null; users soft-default to human with reason `Entra user (sign-in data unavailable)` |
 | Graph `AuditLog.Read.All` | `directoryAudits` ("Add user" / "Add service principal") → `created_by` (~30-day retention) | `created_by` null |
 | Graph `Reports.Read.All` | `servicePrincipalSignInActivities` (Graph beta) → service-principal `last_used` | SP `last_used` null |
 

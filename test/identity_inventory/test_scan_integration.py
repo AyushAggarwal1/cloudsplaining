@@ -19,6 +19,7 @@ INVENTORY_KEYS = {
     "id",
     "name",
     "classification",
+    "classification_reason",
     "created_at",
     "age_days",
     "days_since_last_used",
@@ -51,13 +52,16 @@ class TestAwsScanEmbedsInventory(unittest.TestCase):
         for row in inventory:
             self.assertEqual(set(row.keys()), INVENTORY_KEYS)
             self.assertEqual(row["provider"], "aws")
-            self.assertIn(row["classification"], ("human", "machine"))
+            self.assertIn(row["classification"], ("human", "machine", "unknown"))
+            self.assertTrue(row["classification_reason"])
 
     def test_enriched_download_passes_schema_and_drives_classification(self):
         self.cfg["credentialReport"] = (
             "user,arn,password_enabled,mfa_active,access_key_1_active,access_key_1_last_rotated\n"
             "obama,arn:aws:iam::012345678901:user/obama,false,false,true,2026-05-01T00:00:00+00:00\n"
         )
+        self.cfg["credentialReportGeneratedTime"] = "2026-08-02T10:00:00+00:00"
+        self.cfg["credentialSupplement"] = {}
         self.cfg["cloudTrailEvents"] = []
         inventory = self._scan()["iam_results"]["identity_inventory"]
         by_name = {row["name"]: row for row in inventory}

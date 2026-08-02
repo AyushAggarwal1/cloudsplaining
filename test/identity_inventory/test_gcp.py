@@ -241,5 +241,30 @@ class TestGcpUserAuditLifecycle(unittest.TestCase):
         self.assertNotIn("drive-by@corp.com", {r.name for r in records})
 
 
+class TestGcpClassificationReasons(unittest.TestCase):
+    def test_user_binding_member_with_gserviceaccount_domain_is_machine(self):
+        data = _snapshot()
+        data["bindings"] = [{"role": "roles/viewer", "members": ["user:sa-misfiled@proj.iam.gserviceaccount.com"]}]
+        record = _by_name(build_inventory(data), "sa-misfiled@proj.iam.gserviceaccount.com")
+        self.assertEqual(record.classification, MACHINE)
+        self.assertEqual(record.classification_reason, "workload email domain (gserviceaccount.com)")
+
+    def test_reasons_present_on_all_gcp_records(self):
+        records = build_inventory(_snapshot())
+        self.assertTrue(all(r.classification_reason for r in records))
+        by_type = {r.identity_type: r.classification_reason for r in records}
+        self.assertEqual(by_type.get("service_account"), "service account")
+
+    def test_workspace_user_reason(self):
+        record = _by_name(build_inventory(_snapshot()), "dev@corp.com")
+        self.assertEqual(record.classification, HUMAN)
+        self.assertEqual(record.classification_reason, "Workspace directory user")
+
+    def test_binding_member_reason(self):
+        record = _by_name(build_inventory(_snapshot()), "extra@corp.com")
+        self.assertEqual(record.classification, HUMAN)
+        self.assertEqual(record.classification_reason, "user: IAM binding member")
+
+
 if __name__ == "__main__":
     unittest.main()

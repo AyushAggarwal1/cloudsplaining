@@ -8,10 +8,13 @@ account-alias.json"""
 # or https://opensource.org/licenses/BSD-3-Clause
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -96,7 +99,13 @@ def download(
     if not skip_credential_report:
         report = get_credential_report(_iam_client(session_data))
         if report is not None:
-            results["credentialReport"] = report
+            report_text, generated_time = report
+            results["credentialReport"] = report_text
+            if generated_time:
+                results["credentialReportGeneratedTime"] = generated_time
+            missing = users_missing_from_report(results.get("UserDetailList") or [], report_text)
+            if missing:
+                results["credentialSupplement"] = get_credential_supplement(_iam_client(session_data), missing)
     if not skip_cloudtrail_events:
         events = get_cloudtrail_create_events(_cloudtrail_client(session_data))
         if events is not None:
@@ -120,8 +129,10 @@ def _cloudtrail_client(session_data: dict[str, str]) -> Any:  # noqa: ANN401 - n
     return session.client("cloudtrail", config=config)
 
 
-#: IAM identity-creation events that resolve created_by in the identity inventory.
-CLOUDTRAIL_CREATE_EVENT_NAMES = ("CreateUser", "CreateRole")
+#: IAM identity- and credential-creation events for the identity inventory:
+#: CreateUser/CreateRole resolve created_by; CreateAccessKey/CreateLoginProfile
+#: classify users the cached credential report predates.
+CLOUDTRAIL_CREATE_EVENT_NAMES = ("CreateUser", "CreateRole", "CreateAccessKey", "CreateLoginProfile")
 
 
 def get_cloudtrail_create_events(
@@ -150,13 +161,18 @@ def get_cloudtrail_create_events(
     return events
 
 
-def get_credential_report(iam_client: IAMClient, max_attempts: int = 30, delay_seconds: float = 2.0) -> str | None:
-    """Generate and fetch the account's IAM credential report as CSV text.
+def get_credential_report(
+    iam_client: IAMClient, max_attempts: int = 30, delay_seconds: float = 2.0
+) -> tuple[str, str | None] | None:
+    """Generate and fetch the account's IAM credential report as ``(csv_text, generated_time)``.
 
     The report is the offline source for the identity inventory's credential-shape
     classification (password_enabled / mfa_active / access_key_*_active) and user
-    last-used timestamps. Returns ``None`` when the caller cannot generate it
-    (e.g. missing iam:GenerateCredentialReport) so the download still succeeds.
+    last-used timestamps. AWS serves a cached report for up to four hours, so
+    ``generated_time`` (ISO text, or ``None`` when the API omits it) lets consumers
+    reason about users created after it. Returns ``None`` when the caller cannot
+    generate it (e.g. missing iam:GenerateCredentialReport) so the download still
+    succeeds.
     """
     try:
         for _ in range(max_attempts):
@@ -166,11 +182,62 @@ def get_credential_report(iam_client: IAMClient, max_attempts: int = 30, delay_s
         else:
             logger.warning("Credential report was not ready after %s attempts; skipping.", max_attempts)
             return None
-        content = iam_client.get_credential_report()["Content"]
+        response = iam_client.get_credential_report()
+        content = response["Content"]
     except ClientError as error:
         logger.warning("Skipping credential report: %s", error)
         return None
-    return content.decode("utf-8") if isinstance(content, bytes) else str(content)
+    generated = response.get("GeneratedTime")
+    generated_text = generated.isoformat() if hasattr(generated, "isoformat") else generated
+    text = content.decode("utf-8") if isinstance(content, bytes) else str(content)
+    return text, generated_text
+
+
+#: Ceiling on per-user supplement lookups; the report gap is normally 0-2 users.
+CREDENTIAL_SUPPLEMENT_CAP = 50
+
+
+def users_missing_from_report(user_detail_list: list[dict[str, Any]], report_text: str) -> list[str]:
+    """User names present in the authorization details but absent from the credential report."""
+    reported = {row.get("user") for row in csv.DictReader(io.StringIO(report_text))}
+    return [name for user in user_detail_list if (name := user.get("UserName")) and name not in reported]
+
+
+def get_credential_supplement(iam_client: IAMClient, user_names: list[str]) -> dict[str, dict[str, Any]]:
+    """Live credential shape for users the cached report predates.
+
+    Best-effort per call: a denied call omits its keys, and classification treats a
+    row missing either authoritative field as no evidence.
+    """
+    if len(user_names) > CREDENTIAL_SUPPLEMENT_CAP:
+        logger.warning(
+            "Credential supplement capped at %s of %s users missing from the report.",
+            CREDENTIAL_SUPPLEMENT_CAP,
+            len(user_names),
+        )
+        user_names = user_names[:CREDENTIAL_SUPPLEMENT_CAP]
+    supplement: dict[str, dict[str, Any]] = {}
+    for name in user_names:
+        row: dict[str, Any] = {"checked_at": datetime.now(timezone.utc).isoformat()}
+        try:
+            keys = iam_client.list_access_keys(UserName=name)["AccessKeyMetadata"]
+            row["access_keys_active"] = sum(1 for key in keys if key.get("Status") == "Active")
+        except ClientError as error:
+            logger.warning("Supplement list_access_keys(%s): %s", name, error)
+        try:
+            iam_client.get_login_profile(UserName=name)
+            row["has_login_profile"] = True
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in ("NoSuchEntity", "NoSuchEntityException"):
+                row["has_login_profile"] = False
+            else:
+                logger.warning("Supplement get_login_profile(%s): %s", name, error)
+        try:
+            row["mfa_devices"] = len(iam_client.list_mfa_devices(UserName=name)["MFADevices"])
+        except ClientError as error:
+            logger.warning("Supplement list_mfa_devices(%s): %s", name, error)
+        supplement[name] = row
+    return supplement
 
 
 def get_account_authorization_details(

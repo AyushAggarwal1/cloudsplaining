@@ -24,8 +24,8 @@ import json
 import urllib.parse
 from typing import TYPE_CHECKING, Any
 
-from cloudsplaining.identity_inventory.classify import is_machine_name
-from cloudsplaining.identity_inventory.model import HUMAN, MACHINE, IdentityRecord
+from cloudsplaining.identity_inventory.classify import machine_name_signal, resolve
+from cloudsplaining.identity_inventory.model import HUMAN, MACHINE, UNKNOWN, IdentityRecord
 from cloudsplaining.identity_inventory.parsing import as_bool, max_timestamp, parse_timestamp
 
 if TYPE_CHECKING:
@@ -43,11 +43,15 @@ def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
     child ``access_key`` record whose ``created_by`` is the owning user — structural
     attribution that, unlike audit logs, never expires.
     """
-    creators = _creators(data.get("cloudTrailEvents") or [])
+    events = data.get("cloudTrailEvents") or []
+    creators = _creators(events)
+    credential_events = _credential_event_flags(events)
     report = _credential_report_index(data.get("credentialReport"))
+    report_available = bool(data.get("credentialReport"))
+    supplement = data.get("credentialSupplement") or {}
     records: list[IdentityRecord] = []
     for user in data.get("UserDetailList") or []:
-        records.append(_user_record(user, report, creators))
+        records.append(_user_record(user, report, report_available, supplement, credential_events, creators))
         records.extend(_access_key_records(user, report))
     records += [_role_record(role, creators) for role in data.get("RoleDetailList") or []]
     return records
@@ -57,33 +61,84 @@ def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
 def _user_record(
     user: dict[str, Any],
     report: dict[str, dict[str, Any]],
+    report_available: bool,
+    supplement: dict[str, dict[str, Any]],
+    credential_events: dict[str, dict[str, bool]],
     creators: dict[tuple[str, str], str],
 ) -> IdentityRecord:
     name = user.get("UserName") or ""
     arn = user.get("Arn") or ""
     report_row = report.get(name) or report.get(arn)
+    classification, reason = _user_classification(
+        name, report_row, report_available, supplement.get(name), credential_events.get(name)
+    )
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="user",
         id=arn or user.get("UserId") or name,
         name=name,
-        classification=MACHINE if _is_machine_user(name, report_row) else HUMAN,
+        classification=classification,
+        classification_reason=reason,
         created_at=parse_timestamp(user.get("CreateDate")),
         last_used=_user_last_used(user, report_row),
         created_by=creators.get(("user", name)),
     )
 
 
-def _is_machine_user(name: str, report_row: dict[str, Any] | None) -> bool:
-    """A user is a machine when named like one, or shaped like one: active access
-    keys with neither a console password nor MFA (nobody logs in as it)."""
-    if is_machine_name(name):
-        return True
+def _user_classification(
+    name: str,
+    report_row: dict[str, Any] | None,
+    report_available: bool,
+    supplement_row: dict[str, Any] | None,
+    event_flags: dict[str, bool] | None,
+) -> tuple[str, str]:
+    """Machine-name → live supplement → credential report → CloudTrail credential
+    events → honest unknown; the first present evidence wins."""
+    fallback = (
+        "created after credential report was generated"
+        if report_available
+        else "no credential evidence: credential report unavailable"
+    )
+    return resolve(
+        machine_name_signal(name),
+        _shape_signal(_supplement_shape(supplement_row), "live IAM lookup"),
+        _shape_signal(_report_shape(report_row), "credential report"),
+        _events_signal(event_flags),
+        fallback=fallback,
+    )
+
+
+def _supplement_shape(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Shape from a live-lookup supplement row; needs both authoritative fields."""
+    if not row or "has_login_profile" not in row or "access_keys_active" not in row:
+        return None
+    return {
+        "has_password": bool(row["has_login_profile"]),
+        "has_mfa": bool(row.get("mfa_devices") or 0),
+        "active_keys": int(row["access_keys_active"] or 0),
+    }
+
+
+def _report_shape(report_row: dict[str, Any] | None) -> dict[str, Any] | None:
     if report_row is None:
-        return False
-    if _report_flag(report_row, "password_enabled") or _report_flag(report_row, "mfa_active"):
-        return False
-    return _report_flag(report_row, "access_key_1_active") or _report_flag(report_row, "access_key_2_active")
+        return None
+    active_keys = sum(1 for slot in (1, 2) if _report_flag(report_row, f"access_key_{slot}_active"))
+    return {
+        "has_password": _report_flag(report_row, "password_enabled"),
+        "has_mfa": _report_flag(report_row, "mfa_active"),
+        "active_keys": active_keys,
+    }
+
+
+def _shape_signal(shape: dict[str, Any] | None, source: str) -> tuple[str, str] | None:
+    """Classify a credential shape: password/MFA → human, keys-only → machine, nothing → unknown."""
+    if shape is None:
+        return None
+    if shape["has_password"] or shape["has_mfa"]:
+        return (HUMAN, f"console password or MFA ({source})")
+    if shape["active_keys"]:
+        return (MACHINE, f"active access keys, no console password ({source})")
+    return (UNKNOWN, f"no credentials provisioned ({source})")
 
 
 def _report_flag(row: dict[str, Any], column: str) -> bool:
@@ -109,6 +164,7 @@ def _access_key_records(user: dict[str, Any], report: dict[str, dict[str, Any]])
                 id=f"{arn or name}/access-key-{slot}",
                 name=f"{name}/access-key-{slot}",
                 classification=MACHINE,
+                classification_reason="access key",
                 created_at=rotated,
                 last_used=parse_timestamp(report_row.get(f"access_key_{slot}_last_used_date")),
                 created_by=arn or name,
@@ -137,26 +193,69 @@ def _credential_report_index(raw: str | list[dict[str, Any]] | None) -> dict[str
     return index
 
 
+_CREDENTIAL_EVENT_NAMES = ("CreateAccessKey", "CreateLoginProfile")
+
+
+def _credential_event_flags(events: list[dict[str, Any]]) -> dict[str, dict[str, bool]]:
+    """Map user name -> which credential-creation events CloudTrail saw for them."""
+    flags: dict[str, dict[str, bool]] = {}
+    for item in events:
+        event = _event_payload(item)
+        if event is None:
+            continue
+        event_name = event.get("eventName") or event.get("EventName")
+        if event_name not in _CREDENTIAL_EVENT_NAMES:
+            continue
+        parameters = event.get("requestParameters") or {}
+        response = event.get("responseElements") or {}
+        user = parameters.get("userName") or (response.get("accessKey") or {}).get("userName")
+        if not user:
+            continue
+        key = "access_key_created" if event_name == "CreateAccessKey" else "login_profile_created"
+        flags.setdefault(user, {})[key] = True
+    return flags
+
+
+def _events_signal(flags: dict[str, bool] | None) -> tuple[str, str] | None:
+    """Credential-creation events are corroborating evidence for report-gap users."""
+    if not flags:
+        return None
+    if flags.get("login_profile_created"):
+        return (HUMAN, "console login profile created (CloudTrail events)")
+    if flags.get("access_key_created"):
+        return (MACHINE, "access key created, no console password (CloudTrail events)")
+    return None
+
+
 # ------------------------------------------------------------------------ roles
 def _role_record(role: dict[str, Any], creators: dict[tuple[str, str], str]) -> IdentityRecord:
     name = role.get("RoleName") or ""
+    if _is_service_role(role):
+        classification, reason = MACHINE, "AWS service role"
+    elif _is_sso_role(role):
+        classification, reason = HUMAN, "SAML-federated role"
+    else:
+        classification, reason = MACHINE, "workload role"
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="role",
         id=role.get("Arn") or role.get("RoleId") or name,
         name=name,
-        classification=HUMAN if _is_sso_role(role) else MACHINE,
+        classification=classification,
+        classification_reason=reason,
         created_at=parse_timestamp(role.get("CreateDate")),
         last_used=parse_timestamp((role.get("RoleLastUsed") or {}).get("LastUsedDate")),
         created_by=creators.get(("role", name)),
     )
 
 
+def _is_service_role(role: dict[str, Any]) -> bool:
+    path = role.get("Path") or ""
+    return "/aws-service-role/" in path or "/aws-service-role/" in (role.get("Arn") or "")
+
+
 def _is_sso_role(role: dict[str, Any]) -> bool:
     """Roles assumed by people via SAML federation; every other role is a workload."""
-    path = role.get("Path") or ""
-    if "/aws-service-role/" in path or "/aws-service-role/" in (role.get("Arn") or ""):
-        return False
     for statement in _trust_statements(role):
         actions = statement.get("Action") or []
         if isinstance(actions, str):

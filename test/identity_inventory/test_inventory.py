@@ -42,7 +42,9 @@ class TestDispatcher(unittest.TestCase):
     def test_inventory_returns_dicts_with_derived_fields(self):
         rows = build_identity_inventory("aws", AWS_DATA, reference_time=REF)
         self.assertEqual(rows[0]["name"], "alice")
-        self.assertEqual(rows[0]["classification"], "human")
+        # No credential report in AWS_DATA → honest unknown, not a silent human guess.
+        self.assertEqual(rows[0]["classification"], "unknown")
+        self.assertEqual(rows[0]["classification_reason"], "no credential evidence: credential report unavailable")
         self.assertEqual(rows[0]["age_days"], 30)
 
 
@@ -60,9 +62,9 @@ class TestCsv(unittest.TestCase):
         lines = text.strip().splitlines()
         self.assertEqual(
             lines[0],
-            "provider,identity_type,id,name,classification,created_at,age_days,days_since_last_used,created_by,last_used",
+            "provider,identity_type,id,name,classification,classification_reason,created_at,age_days,days_since_last_used,created_by,last_used",
         )
-        self.assertIn("alice,human,2026-07-02T00:00:00+00:00,30,,,", lines[1])
+        self.assertIn("alice,human,,2026-07-02T00:00:00+00:00,30,,,", lines[1])
 
 
 if __name__ == "__main__":

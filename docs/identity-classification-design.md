@@ -11,9 +11,10 @@ silent binary human/machine guess when evidence is missing, and each implements 
 
 Observed failure (AWS): a user created inside the credential-report cache window (AWS caches the report
 up to 4 hours; regeneration cannot be forced) has no report row. With a neutral name (`ciem`), the
-classifier hits the no-evidence default and silently reports `human`. Verified against the live scan:
-`ciem` created 2026-08-02T14:37Z, scan at ~14:53Z, newest report row from Jul 31 — no `ciem` row,
-CreateUser CloudTrail event present (so `created_by` resolved), classification wrong.
+classifier hits the no-evidence default and silently reports `human`. Verified against a live scan:
+`ciem` created 2026-08-02T14:37Z, scan at ~14:53Z, newest credential-report row from Jul 31 — no
+`ciem` row, CreateUser CloudTrail event present (so `created_by` resolved), classification wrong.
+(Account details redacted; live scan artifacts stay in gitignored `.live-scans/`.)
 
 Same disease elsewhere:
 - Azure: users classified by name heuristic alone; no structural signal at all.
@@ -87,7 +88,10 @@ Users, through the resolver:
   ⇒ machine).
 - Report row present but zero credentials (no password, no keys, no MFA) → `unknown`,
   reason `"no credentials provisioned"`. (Behavior change: today silently human.)
-- Nothing anywhere → `unknown`; reason includes created-at vs `credentialReportGeneratedTime`.
+- Nothing anywhere → `unknown` with a stable, matchable reason: `"created after credential report was
+  generated"` when a report exists, `"no credential evidence: credential report unavailable"` when it
+  does not (the record's `created_at` and the snapshot's `credentialReportGeneratedTime` carry the
+  timestamps; reason strings stay constant for platform matching).
 
 Roles (semantics unchanged, reasons added): service-role path → machine; SAML/Identity Center trust →
 human; otherwise machine (`"workload role"`). Access-key child records → machine (`"access key"`).
@@ -122,15 +126,18 @@ Service principals: machine (`"service principal"`). Users:
 
 ## OCI
 
-Dynamic groups: machine (`"workload identity"`). Users:
+Dynamic groups: machine (`"workload identity"`). Users (capabilities read from BOTH the classic
+`capabilities` key AND the SCIM extension `urn:ietf:params:scim:schemas:oracle:idcs:extension:capabilities:User`,
+fixing the ignored-SCIM bug):
 1. Name token → machine.
-2. MFA enrolled OR successful console login recorded → human.
-3. Capabilities from BOTH the classic `capabilities` key AND the SCIM extension
-   `urn:ietf:params:scim:schemas:oracle:idcs:extension:capabilities:User` (fixes ignored-SCIM bug):
-   console password disabled + API keys enabled → machine (`"API-key-only capabilities"`);
-   console-capable → human (`"console-capable (default)"` — soft, creation default).
-4. No capabilities in either shape, no MFA, no login, neutral name → `unknown`
-   (behavior change: today silently human).
+2. MFA enrolled → human (`"MFA enrolled"` — enrollment is current state).
+3. Console password disabled + API keys enabled → machine (`"API-key-only capabilities"`).
+   Ranked above login history deliberately: an account converted to a service user keeps its old
+   login timestamp, but its current shape is a machine. (Refined during implementation — an
+   existing collector test exposed the converted-account case.)
+4. Successful console login recorded → human (`"console login recorded"`).
+5. Console-capable → human (`"console-capable (default)"` — soft, creation default).
+6. Nothing → `unknown` (behavior change: today silently human).
 
 ## Degradation & error handling
 

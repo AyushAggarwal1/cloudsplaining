@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 
 from cloudsplaining.identity_inventory.azure import build_inventory
-from cloudsplaining.identity_inventory.model import HUMAN, MACHINE
+from cloudsplaining.identity_inventory.model import HUMAN, MACHINE, UNKNOWN
 
 
 def _snapshot():
@@ -99,6 +99,58 @@ class TestAzureInventory(unittest.TestCase):
         self.assertIsNone(sp2.created_at)
         self.assertIsNone(sp2.last_used)
         self.assertIsNone(sp2.created_by)
+
+
+class TestAzureClassificationSignals(unittest.TestCase):
+    def _user(self, **overrides):
+        user = {"id": "u1", "userPrincipalName": "pat@corp.com", "displayName": "Pat"}
+        user.update(overrides)
+        return user
+
+    def _record(self, user, others=()):
+        data = {"users": [user, *others], "servicePrincipals": []}
+        return next(r for r in build_inventory(data) if r.id == user["id"])
+
+    def test_interactive_sign_in_is_human(self):
+        record = self._record(self._user(signInActivity={"lastSignInDateTime": "2026-07-01T00:00:00Z"}))
+        self.assertEqual(record.classification, HUMAN)
+        self.assertEqual(record.classification_reason, "interactive sign-ins")
+
+    def test_non_interactive_only_is_machine(self):
+        record = self._record(self._user(signInActivity={"lastNonInteractiveSignInDateTime": "2026-07-01T00:00:00Z"}))
+        self.assertEqual(record.classification, MACHINE)
+        self.assertEqual(record.classification_reason, "non-interactive sign-ins only")
+
+    def test_never_signed_in_is_unknown_when_data_available(self):
+        other = {
+            "id": "u2",
+            "userPrincipalName": "x@corp.com",
+            "signInActivity": {"lastSignInDateTime": "2026-07-01T00:00:00Z"},
+        }
+        record = self._record(self._user(), others=[other])
+        self.assertEqual(record.classification, UNKNOWN)
+        self.assertEqual(record.classification_reason, "never signed in")
+
+    def test_soft_human_default_when_sign_in_data_unavailable(self):
+        record = self._record(self._user())
+        self.assertEqual(record.classification, HUMAN)
+        self.assertEqual(record.classification_reason, "Entra user (sign-in data unavailable)")
+
+    def test_sync_account_is_machine(self):
+        record = self._record(
+            self._user(
+                userPrincipalName="Sync_AAD1@corp.onmicrosoft.com",
+                displayName="On-Premises Directory Synchronization Service Account",
+            )
+        )
+        self.assertEqual(record.classification, MACHINE)
+        self.assertEqual(record.classification_reason, "directory synchronization account")
+
+    def test_service_principal_reason(self):
+        data = {"users": [], "servicePrincipals": [{"id": "sp1", "displayName": "neutral-app"}]}
+        record = build_inventory(data)[0]
+        self.assertEqual(record.classification, MACHINE)
+        self.assertEqual(record.classification_reason, "service principal")
 
 
 if __name__ == "__main__":
