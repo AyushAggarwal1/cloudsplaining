@@ -85,8 +85,13 @@ and snake_case (OCI CLI emits kebab-case; SDKs emit snake_case; REST APIs camelC
 - **Azure** — the collector requests `createdDateTime`, `userType`, `accountEnabled`, and
   `signInActivity` for users (falling back without `signInActivity` when the tenant lacks
   `AuditLog.Read.All` / Entra ID P1) and `createdDateTime` for service principals.
-- **GCP** — no extra calls needed: the service-account vs. user split from the IAM API is already
-  the authoritative classification signal.
+- **GCP** — the service-account vs. user split from the IAM API is already the authoritative
+  classification signal. Human users' lifecycle comes from Admin Activity audit logs
+  (`auditLogEntries`): their newest logged activity → `last_used`, and the first `SetIamPolicy`
+  grant that added the `user:` member → proxy `created_at` + `created_by` (~400-day window).
+  The Workspace Admin SDK scope (`admin.directory.user.readonly`) is deliberately **not**
+  required; a Workspace `users.list` export is honored if supplied (`creationTime` authoritative,
+  `lastLoginTime` merged into `last_used`).
 
 Name heuristic (`classify.py`): a name is machine-like when a token such as `svc`, `service`, `bot`,
 `ci`, `cicd`, `deploy`, `automation`, `jenkins`, `terraform`, `github`, `pipeline`, `lambda`,
@@ -99,9 +104,9 @@ structural rules above.
 
 | Field | aws | azure | gcp | oci |
 |---|---|---|---|---|
-| `created_at` | `CreateDate` (authorization details) | `createdDateTime` | `createTime` if exported; else audit-log `CreateServiceAccount` entry; Workspace `creationTime` | `time-created` / `meta.created` |
-| `last_used` | roles: `RoleLastUsed.LastUsedDate`; users: max of credential-report `password_last_used`, `access_key_*_last_used_date` | users: max of `signInActivity.{lastSignInDateTime,lastNonInteractiveSignInDateTime}`; SPs: `servicePrincipalSignInActivities` (by `appId`) | SAs: Policy Analyzer `serviceAccountLastAuthentication` (`lastAuthenticatedTime`); users: Workspace `lastLoginTime` | `lastSuccessfulLoginTime` / identity-domains `userState.lastSuccessfulLoginDate` |
-| `created_by` | optional `cloudTrailEvents` (`CreateUser`/`CreateRole`, raw LookupEvents or simplified) | optional `directoryAudits` (`Add user` / `Add service principal`, `initiatedBy`) | audit-log entry `authenticationInfo.principalEmail` | `idcsCreatedBy` (identity domains) or optional `auditEvents` |
+| `created_at` | `CreateDate` (authorization details) | `createdDateTime` | SAs: `createTime` if exported, else audit-log `CreateServiceAccount` entry; users: Workspace `creationTime` if supplied, else first `SetIamPolicy` audit entry that ADDed the `user:` member | `time-created` / `meta.created` |
+| `last_used` | roles: `RoleLastUsed.LastUsedDate`; users: max of credential-report `password_last_used`, `access_key_*_last_used_date` | users: max of `signInActivity.{lastSignInDateTime,lastNonInteractiveSignInDateTime}`; SPs: `servicePrincipalSignInActivities` (by `appId`) | SAs: Policy Analyzer `serviceAccountLastAuthentication` (`lastAuthenticatedTime`); users: newest of audit-log activity (`authenticationInfo.principalEmail`) and Workspace `lastLoginTime` if supplied | `lastSuccessfulLoginTime` / identity-domains `userState.lastSuccessfulLoginDate` |
+| `created_by` | optional `cloudTrailEvents` (`CreateUser`/`CreateRole`, raw LookupEvents or simplified) | optional `directoryAudits` (`Add user` / `Add service principal`, `initiatedBy`) | SAs: `CreateServiceAccount` caller; users: `SetIamPolicy` granter (audit logs) | `idcsCreatedBy` (identity domains) or optional `auditEvents` |
 | `age_days` | derived: `(reference_time - created_at).days` | ← | ← | ← |
 | `days_since_last_used` | derived: `(reference_time - last_used).days`; `None` when never used/unknown | ← | ← | ← |
 

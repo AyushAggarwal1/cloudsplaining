@@ -7,7 +7,10 @@ optionally:
   (Admin SDK ``users.list``) — human users with ``creationTime`` /
   ``lastLoginTime``.
 - ``auditLogEntries``: Admin Activity log entries — fills service-account
-  ``created_at`` / ``created_by`` from ``CreateServiceAccount`` calls.
+  ``created_at`` / ``created_by`` from ``CreateServiceAccount`` calls, human
+  users' ``last_used`` from their latest logged activity, and human users'
+  ``created_at`` / ``created_by`` from the ``SetIamPolicy`` grant that first
+  added them (the in-GCP proxy that replaces the Workspace Admin SDK scope).
 - ``serviceAccountActivities``: Policy Analyzer
   ``serviceAccountLastAuthentication`` activities — fills service-account
   ``last_used``.
@@ -28,7 +31,7 @@ from typing import Any
 
 from cloudsplaining.identity_inventory.classify import is_machine_name
 from cloudsplaining.identity_inventory.model import HUMAN, MACHINE, IdentityRecord
-from cloudsplaining.identity_inventory.parsing import get_field, parse_timestamp
+from cloudsplaining.identity_inventory.parsing import get_field, max_timestamp, parse_timestamp
 
 PROVIDER = "gcp"
 
@@ -38,8 +41,11 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
     """Inventory service accounts and human users; groups/domains are not identities."""
-    sa_audit = _sa_audit(data.get("auditLogEntries") or [])
+    audit_entries = data.get("auditLogEntries") or []
+    sa_audit = _sa_audit(audit_entries)
     activities = _sa_activities(data.get("serviceAccountActivities") or [])
+    user_activity = _user_activity(audit_entries)
+    user_grants = _user_grants(audit_entries)
 
     records: list[IdentityRecord] = []
     seen: set[str] = set()
@@ -49,7 +55,7 @@ def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
         seen.add(email)
     for user in data.get("users") or []:
         email = get_field(user, "primaryEmail") or ""
-        records.append(_user_record(user))
+        records.append(_user_record(user, user_activity, user_grants))
         seen.add(email)
     for member_type, email in _binding_members(data.get("bindings") or []):
         if email in seen:
@@ -58,7 +64,7 @@ def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
         if member_type == "service_account":
             records.append(_sa_record({"email": email}, sa_audit, activities))
         else:
-            records.append(_member_user_record(email))
+            records.append(_member_user_record(email, user_activity, user_grants))
     return records
 
 
@@ -113,30 +119,88 @@ def _sa_activities(activities: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------------- users
-def _user_record(user: dict[str, Any]) -> IdentityRecord:
+def _user_record(
+    user: dict[str, Any],
+    user_activity: dict[str, datetime],
+    user_grants: dict[str, tuple[datetime, str | None]],
+) -> IdentityRecord:
     email = get_field(user, "primaryEmail") or ""
     last_login = parse_timestamp(get_field(user, "lastLoginTime"))
     if last_login == _EPOCH:
         last_login = None
+    grant_time, grant_actor = user_grants.get(email, (None, None))
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="user",
         id=user.get("id") or email,
         name=email,
         classification=MACHINE if is_machine_name(email) else HUMAN,
-        created_at=parse_timestamp(get_field(user, "creationTime")),
-        last_used=last_login,
+        # The Workspace directory creationTime is authoritative; the first
+        # SetIamPolicy grant is only a proxy for when the user entered GCP.
+        created_at=parse_timestamp(get_field(user, "creationTime")) or grant_time,
+        last_used=max_timestamp(last_login, user_activity.get(email)),
+        created_by=grant_actor,
     )
 
 
-def _member_user_record(email: str) -> IdentityRecord:
+def _member_user_record(
+    email: str,
+    user_activity: dict[str, datetime],
+    user_grants: dict[str, tuple[datetime, str | None]],
+) -> IdentityRecord:
+    grant_time, grant_actor = user_grants.get(email, (None, None))
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="user",
         id=email,
         name=email,
         classification=MACHINE if is_machine_name(email) else HUMAN,
+        created_at=grant_time,
+        last_used=user_activity.get(email),
+        created_by=grant_actor,
     )
+
+
+def _user_activity(entries: list[dict[str, Any]]) -> dict[str, datetime]:
+    """Map principal email -> latest audit-log activity timestamp."""
+    latest: dict[str, datetime] = {}
+    for entry in entries:
+        payload = get_field(entry, "protoPayload") or {}
+        email = get_field(get_field(payload, "authenticationInfo") or {}, "principalEmail")
+        stamp = parse_timestamp(get_field(entry, "timestamp") or get_field(entry, "receiveTimestamp"))
+        if not email or stamp is None:
+            continue
+        if email not in latest or stamp > latest[email]:
+            latest[email] = stamp
+    return latest
+
+
+def _user_grants(entries: list[dict[str, Any]]) -> dict[str, tuple[datetime, str | None]]:
+    """Map user email -> (earliest SetIamPolicy ADD timestamp, granting principal).
+
+    The grant that first added a ``user:`` member is the closest in-GCP proxy for
+    created_at/created_by without the Workspace Admin SDK scope.
+    """
+    grants: dict[str, tuple[datetime, str | None]] = {}
+    for entry in entries:
+        payload = get_field(entry, "protoPayload") or {}
+        method = get_field(payload, "methodName") or ""
+        if not method.endswith("SetIamPolicy"):
+            continue
+        stamp = parse_timestamp(get_field(entry, "timestamp") or get_field(entry, "receiveTimestamp"))
+        if stamp is None:
+            continue
+        actor = get_field(get_field(payload, "authenticationInfo") or {}, "principalEmail")
+        delta = get_field(get_field(payload, "serviceData") or {}, "policyDelta") or {}
+        for binding_delta in get_field(delta, "bindingDeltas") or []:
+            if str(get_field(binding_delta, "action") or "").upper() != "ADD":
+                continue
+            kind, _, member_email = str(get_field(binding_delta, "member") or "").partition(":")
+            if kind != "user" or not member_email:
+                continue
+            if member_email not in grants or stamp < grants[member_email][0]:
+                grants[member_email] = (stamp, actor)
+    return grants
 
 
 def _binding_members(bindings: list[dict[str, Any]]) -> list[tuple[str, str]]:

@@ -34,8 +34,16 @@ A read-only role with the AWS-managed `SecurityAudit` policy covers all three.
 |---|---|---|
 | `iam.serviceAccounts.list` + `resourcemanager.projects.getIamPolicy` (e.g. `roles/viewer`) | **Core** — service accounts, binding members, structural classification, SA `created_at` | no identities |
 | `policyanalyzer.serviceAccountLastAuthenticationActivities.query` (`roles/policyanalyzer.activityAnalysisViewer`) | SA `last_used` (Policy Analyzer `lastAuthenticatedTime`) | null |
-| `logging.logEntries.list` (`roles/logging.viewer`) for `CreateServiceAccount` audit entries (~400-day retention) | SA `created_by` (and `created_at` fallback) | null |
-| Workspace Admin SDK `admin.directory.user.readonly` | human users' `created_at` / `last_used` (`creationTime` / `lastLoginTime`) | users appear only as binding members with lifecycle fields null |
+| `logging.logEntries.list` (`roles/logging.viewer`) — Admin Activity audit entries, always on, free, ~400-day retention | SA `created_by`/`created_at` (`CreateServiceAccount`); human users' `last_used` (their newest logged activity) and proxy `created_at`/`created_by` (the `SetIamPolicy` grant that first added the user, plus who granted it) | null |
+
+Human users' lifecycle comes entirely from the audit logs above — the Workspace Admin SDK scope
+(`admin.directory.user.readonly`) is **deliberately not required**: it needs a Workspace Super Admin
+to set up domain-wide delegation and only adds the Google-account creation date and console-login
+time. If a Workspace `users.list` export is supplied anyway, the builder uses its `creationTime`
+as authoritative and takes the newest of `lastLoginTime` and audit activity for `last_used`.
+Semantics of the audit-log substitute: `last_used` means "last activity *in GCP*" (read-only calls
+only appear if Data Access logs are enabled) and `created_at` means "when the user was first
+granted GCP access", both bounded by the 400-day retention window.
 
 ## OCI
 
@@ -50,5 +58,6 @@ A read-only role with the AWS-managed `SecurityAudit` policy covers all three.
   `created_by` for identities older than the audit-log retention window).
 - **Azure**: user `last_used` and `created_by` gate on an extra Graph permission
   (`AuditLog.Read.All`) *and*, for sign-in activity, a paid Entra ID P1/P2 license.
-- **GCP**: full coverage needs three separate APIs — Policy Analyzer, Cloud Logging, and the
-  Workspace Admin SDK — on top of the core IAM read access.
+- **GCP**: full coverage needs two extra APIs — Policy Analyzer and Cloud Logging — on top of the
+  core IAM read access. No Workspace Admin SDK scope is needed: audit logs supply human users'
+  `last_used` and proxy `created_at`/`created_by` (400-day window).

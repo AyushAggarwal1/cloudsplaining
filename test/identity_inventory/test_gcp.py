@@ -103,5 +103,143 @@ class TestGcpInventory(unittest.TestCase):
         self.assertEqual(sa.last_used, datetime(2026, 7, 15, tzinfo=timezone.utc))
 
 
+class TestGcpUserAuditLifecycle(unittest.TestCase):
+    """Audit logs substitute for the Workspace Admin SDK scope (admin.directory.user.readonly):
+    any Admin Activity entry gives a user's last GCP activity, and the SetIamPolicy grant that
+    first added the user is the created_at/created_by proxy."""
+
+    def test_user_last_used_from_audit_activity(self):
+        data = _snapshot()
+        data["auditLogEntries"] = [
+            {
+                "timestamp": "2026-05-01T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "v1.compute.instances.insert",
+                    "authenticationInfo": {"principalEmail": "extra@corp.com"},
+                },
+            },
+            {
+                "timestamp": "2026-07-20T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "storage.buckets.list",
+                    "authenticationInfo": {"principalEmail": "extra@corp.com"},
+                },
+            },
+        ]
+        extra = _by_name(build_inventory(data), "extra@corp.com")
+        self.assertEqual(extra.last_used, datetime(2026, 7, 20, tzinfo=timezone.utc))
+
+    def test_user_last_used_is_newest_of_workspace_login_and_audit_activity(self):
+        data = _snapshot()
+        data["auditLogEntries"] = [
+            {
+                "timestamp": "2026-08-01T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "storage.buckets.list",
+                    "authenticationInfo": {"principalEmail": "dev@corp.com"},
+                },
+            }
+        ]
+        dev = _by_name(build_inventory(data), "dev@corp.com")
+        self.assertEqual(dev.last_used, datetime(2026, 8, 1, tzinfo=timezone.utc))
+
+    def test_set_iam_policy_grant_fills_created_at_and_created_by(self):
+        data = _snapshot()
+        data["auditLogEntries"] = [
+            {
+                "timestamp": "2026-04-10T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "SetIamPolicy",
+                    "authenticationInfo": {"principalEmail": "admin@corp.com"},
+                    "serviceData": {
+                        "policyDelta": {
+                            "bindingDeltas": [
+                                {"action": "ADD", "role": "roles/viewer", "member": "user:extra@corp.com"}
+                            ]
+                        }
+                    },
+                },
+            }
+        ]
+        extra = _by_name(build_inventory(data), "extra@corp.com")
+        self.assertEqual(extra.created_at, datetime(2026, 4, 10, tzinfo=timezone.utc))
+        self.assertEqual(extra.created_by, "admin@corp.com")
+
+    def test_earliest_grant_wins(self):
+        data = _snapshot()
+        grant = {
+            "methodName": "SetIamPolicy",
+            "authenticationInfo": {"principalEmail": "admin@corp.com"},
+            "serviceData": {
+                "policyDelta": {
+                    "bindingDeltas": [{"action": "ADD", "role": "roles/viewer", "member": "user:extra@corp.com"}]
+                }
+            },
+        }
+        data["auditLogEntries"] = [
+            {"timestamp": "2026-06-01T00:00:00Z", "protoPayload": grant},
+            {"timestamp": "2026-03-01T00:00:00Z", "protoPayload": grant},
+        ]
+        extra = _by_name(build_inventory(data), "extra@corp.com")
+        self.assertEqual(extra.created_at, datetime(2026, 3, 1, tzinfo=timezone.utc))
+
+    def test_workspace_creation_time_wins_over_grant_proxy(self):
+        data = _snapshot()
+        data["auditLogEntries"] = [
+            {
+                "timestamp": "2026-04-10T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "SetIamPolicy",
+                    "authenticationInfo": {"principalEmail": "admin@corp.com"},
+                    "serviceData": {
+                        "policyDelta": {
+                            "bindingDeltas": [{"action": "ADD", "role": "roles/viewer", "member": "user:dev@corp.com"}]
+                        }
+                    },
+                },
+            }
+        ]
+        dev = _by_name(build_inventory(data), "dev@corp.com")
+        # Workspace creationTime is authoritative; the grant only supplies created_by.
+        self.assertEqual(dev.created_at, datetime(2024, 8, 1, tzinfo=timezone.utc))
+        self.assertEqual(dev.created_by, "admin@corp.com")
+
+    def test_remove_only_deltas_do_not_fill_creation(self):
+        data = _snapshot()
+        data["auditLogEntries"] = [
+            {
+                "timestamp": "2026-04-10T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "SetIamPolicy",
+                    "authenticationInfo": {"principalEmail": "admin@corp.com"},
+                    "serviceData": {
+                        "policyDelta": {
+                            "bindingDeltas": [
+                                {"action": "REMOVE", "role": "roles/viewer", "member": "user:extra@corp.com"}
+                            ]
+                        }
+                    },
+                },
+            }
+        ]
+        extra = _by_name(build_inventory(data), "extra@corp.com")
+        self.assertIsNone(extra.created_at)
+        self.assertIsNone(extra.created_by)
+
+    def test_audit_activity_does_not_create_new_identity_rows(self):
+        data = _snapshot()
+        data["auditLogEntries"] = [
+            {
+                "timestamp": "2026-07-20T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "storage.buckets.list",
+                    "authenticationInfo": {"principalEmail": "drive-by@corp.com"},
+                },
+            }
+        ]
+        records = build_inventory(data)
+        self.assertNotIn("drive-by@corp.com", {r.name for r in records})
+
+
 if __name__ == "__main__":
     unittest.main()
