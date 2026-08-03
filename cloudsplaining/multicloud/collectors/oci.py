@@ -34,11 +34,16 @@ logger = logging.getLogger(__name__)
 #: OCI Audit retains 365 days but rejects startTime older than that *at request
 #: time* — validated again on every paginated call — so stay a day inside it.
 _AUDIT_LOOKBACK_DAYS = 364
-#: Creation events carry the operation time, but audit-pipeline clock skew can
-#: place them slightly off the resource's timeCreated.
-_AUDIT_WINDOW_PADDING = timedelta(minutes=15)
-#: Global page budget across all windows: list_events has no server-side
-#: event-type filter and busy root compartments emit large pages of noise.
+#: Observed skew between a creation event's time and the resource's
+#: timeCreated is ~0.1s; quick delete-recreate cycles put a namesake's event
+#: ~90s off. Wider padding just adds pages of unrelated tenancy noise.
+_AUDIT_WINDOW_PADDING = timedelta(minutes=2)
+#: list_events has no server-side event-type filter, so a window that
+#: coincides with heavy API traffic pages pure noise; cap it so one noisy
+#: window cannot starve the rest.
+_AUDIT_WINDOW_PAGE_LIMIT = 5
+#: Global page budget across all windows: bounds collect() wall time on
+#: tenancies with many distinct creation days.
 _AUDIT_PAGE_LIMIT = 100
 
 
@@ -111,8 +116,10 @@ class OciCollector(Collector):
             budget = _AUDIT_PAGE_LIMIT
             for start_time, end_time in self._creation_windows(creation_times):
                 page = None
-                while budget > 0:
+                window_pages = 0
+                while budget > 0 and window_pages < _AUDIT_WINDOW_PAGE_LIMIT:
                     budget -= 1
+                    window_pages += 1
                     kwargs: dict[str, Any] = {"compartment_id": tenancy, "start_time": start_time, "end_time": end_time}
                     if page:
                         kwargs["page"] = page
@@ -139,7 +146,12 @@ class OciCollector(Collector):
 
     @staticmethod
     def _creation_windows(creation_times: list[Any]) -> list[tuple[datetime, datetime]]:
-        """Merged, padded query windows around identity creation times, clamped to retention."""
+        """Merged, padded query windows around identity creation times, clamped to retention.
+
+        Newest first: if the page budget runs out, the identities most likely
+        to still have their creation event in retention are covered first, and
+        the inventory builder keeps the first event it sees per resource name.
+        """
         now = datetime.now(timezone.utc)
         floor = now - timedelta(days=_AUDIT_LOOKBACK_DAYS)
         times = []
@@ -157,7 +169,7 @@ class OciCollector(Collector):
                 windows[-1] = (windows[-1][0], max(end, windows[-1][1]))
             else:
                 windows.append((start, end))
-        return windows
+        return list(reversed(windows))
 
     @staticmethod
     def _creation_event(obj: Any) -> dict[str, Any] | None:

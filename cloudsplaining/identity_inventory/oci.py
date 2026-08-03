@@ -117,7 +117,12 @@ def _dynamic_group_record(group: dict[str, Any], creators: dict[str, str]) -> Id
 
 
 def _audit_creators(events: list[dict[str, Any]]) -> dict[str, str]:
-    """Map created resource name -> creator principal from identity-creation audit events."""
+    """Map created resource name -> creator principal from identity-creation audit events.
+
+    First event wins per name: the collector orders events most-relevant-first
+    (newest creation window first), and a name can recur when a deleted
+    identity's namesake was created earlier in the retention window.
+    """
     creators: dict[str, str] = {}
     for event in events:
         kind = str(get_field(event, "eventType") or get_field(event, "eventName") or "").lower()
@@ -128,5 +133,5 @@ def _audit_creators(events: list[dict[str, Any]]) -> dict[str, str]:
         target = get_field(payload, "resourceName") or get_field(event, "resourceName")
         actor = get_field(identity, "principalName") or get_field(event, "principalName")
         if target and actor:
-            creators[target] = actor
+            creators.setdefault(target, actor)
     return creators

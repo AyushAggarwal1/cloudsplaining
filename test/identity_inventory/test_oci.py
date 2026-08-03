@@ -98,6 +98,23 @@ class TestOciInventory(unittest.TestCase):
         ]
         self.assertEqual(_by_name(build_inventory(data), "ravi").created_by, "tenancy-admin")
 
+    def test_first_audit_event_wins_per_resource(self):
+        # The collector emits events newest-window-first, so the first event
+        # seen for a name is the current incarnation of that identity; later
+        # ones are older create events for a since-deleted namesake.
+        data = _snapshot()
+        data["auditEvents"] = [
+            {
+                "eventType": "com.oraclecloud.identitycontrolplane.createuser",
+                "data": {"resourceName": "ravi", "identity": {"principalName": "current-admin"}},
+            },
+            {
+                "eventType": "com.oraclecloud.identitycontrolplane.createuser",
+                "data": {"resourceName": "ravi", "identity": {"principalName": "previous-admin"}},
+            },
+        ]
+        self.assertEqual(_by_name(build_inventory(data), "ravi").created_by, "current-admin")
+
     def test_idcs_created_by_wins_over_audit_events(self):
         data = _snapshot()
         data["auditEvents"] = [

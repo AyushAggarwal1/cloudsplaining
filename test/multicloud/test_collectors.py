@@ -127,7 +127,7 @@ class _FakeAuditClient:
 
 
 class _FakePagingAuditClient(_FakeAuditClient):
-    """Serves one creation event per page, up to total_pages pages."""
+    """Serves one creation event per page; every window pages endlessly (up to total_pages)."""
 
     def __init__(self, total_pages):
         super().__init__()
@@ -135,6 +135,7 @@ class _FakePagingAuditClient(_FakeAuditClient):
         self.pages_served = 0
 
     def list_events(self, compartment_id, start_time, end_time, page=None):
+        self.windows.append((start_time, end_time))
         self.pages_served += 1
         events = [_audit_event("com.oraclecloud.identityControlPlane.CreateUser", "alice", "admin@corp.com")]
         next_page = str(self.pages_served) if self.pages_served < self.total_pages else None
@@ -232,10 +233,12 @@ class TestOciAuditCollection(unittest.TestCase):
         audit = _FakeAuditClient()
         self._collector(audit).collect()
         self.assertEqual(len(audit.windows), 2)
-        for (start_time, end_time), created in zip(audit.windows, [_OCI_USER_CREATED, _OCI_DG_CREATED]):
+        # Newest identity first: under page-budget pressure the most recent
+        # (most attributable) identities win.
+        for (start_time, end_time), created in zip(audit.windows, [_OCI_DG_CREATED, _OCI_USER_CREATED]):
             self.assertLessEqual(start_time, created)
             self.assertGreaterEqual(end_time, created)
-            self.assertLessEqual(end_time - start_time, timedelta(hours=1))
+            self.assertLessEqual(end_time - start_time, timedelta(minutes=5))
 
     def test_identities_outside_retention_are_not_queried(self):
         # Their creation events are beyond the audit service's 365-day
@@ -260,12 +263,14 @@ class TestOciAuditCollection(unittest.TestCase):
         collector = get_collector("oci", tenancy_id="ocid.tenancy", client=_FakeIdentityClient())
         self.assertEqual(collector.collect()["auditEvents"], [])
 
-    def test_audit_scan_is_page_capped(self):
-        # A year of root-compartment audit events can span many pages and the
-        # API has no server-side event-type filter; the scan must stay bounded.
+    def test_audit_scan_is_page_capped_per_window(self):
+        # A noisy window (e.g. scanner traffic around a creation time) must
+        # not starve the others: each window gets a bounded number of pages
+        # and every window is still visited.
         audit = _FakePagingAuditClient(total_pages=300)
         snapshot = self._collector(audit).collect()
-        self.assertLessEqual(audit.pages_served, 100)
+        self.assertEqual(len(set(audit.windows)), 2)
+        self.assertLessEqual(audit.pages_served, 10)
         self.assertTrue(snapshot["auditEvents"])
 
     def test_snapshot_with_audit_events_feeds_created_by(self):
