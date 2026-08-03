@@ -173,6 +173,211 @@ class _StubGraphAzureCollector(AzureCollector):
         return [{"id": "g1", "displayName": "Engineering"}]
 
 
+class _FakeGcpRequest:
+    def __init__(self, data):
+        self._data = data
+
+    def execute(self):
+        if isinstance(self._data, Exception):
+            raise self._data
+        return self._data
+
+
+class _FakeGcpIam:
+    """Chameleon stand-in for the IAM discovery client's fluent chains."""
+
+    def projects(self):
+        return self
+
+    def serviceAccounts(self):
+        return self
+
+    def roles(self):
+        return self
+
+    def list(self, **kwargs):
+        if "name" in kwargs:
+            data = {"accounts": [{"email": "sa@demo.iam.gserviceaccount.com", "uniqueId": "111", "displayName": "sa"}]}
+        else:
+            data = {"roles": []}
+        return _FakeGcpRequest(data)
+
+    def list_next(self, request, response):
+        return None
+
+    def get(self, name):
+        return _FakeGcpRequest({"name": name, "title": name, "includedPermissions": ["iam.roles.get"]})
+
+
+class _FakeGcpCrm:
+    def projects(self):
+        return self
+
+    def getIamPolicy(self, resource, body):
+        bindings = [
+            {"role": "roles/owner", "members": ["user:jane@corp.com", "serviceAccount:sa@demo.iam.gserviceaccount.com"]}
+        ]
+        return _FakeGcpRequest({"bindings": bindings})
+
+
+class _FakeGcpPolicyAnalyzer:
+    def __init__(self, error=None):
+        self.error = error
+        self.parents = []
+
+    def projects(self):
+        return self
+
+    def locations(self):
+        return self
+
+    def activityTypes(self):
+        return self
+
+    def activities(self):
+        return self
+
+    def query(self, parent, pageSize):
+        self.parents.append(parent)
+        if self.error:
+            return _FakeGcpRequest(self.error)
+        activity = {
+            "activityType": "serviceAccountLastAuthentication",
+            "fullResourceName": "//iam.googleapis.com/projects/demo/serviceAccounts/sa@demo.iam.gserviceaccount.com",
+            "activity": {
+                "lastAuthenticatedTime": "2026-07-27T07:00:00Z",
+                "serviceAccount": {"email": "sa@demo.iam.gserviceaccount.com"},
+            },
+        }
+        return _FakeGcpRequest({"activities": [activity]})
+
+    def query_next(self, request, response):
+        return None
+
+
+class _FakeGcpLogging:
+    def __init__(self, error=None):
+        self.error = error
+        self.bodies = []
+
+    def entries(self):
+        return self
+
+    def list(self, body):
+        self.bodies.append(body)
+        if self.error:
+            return _FakeGcpRequest(self.error)
+        if "SetIamPolicy" in body.get("filter", ""):
+            entry = {
+                "timestamp": "2026-01-05T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "SetIamPolicy",
+                    "authenticationInfo": {"principalEmail": "admin@corp.com"},
+                    "serviceData": {
+                        "policyDelta": {"bindingDeltas": [{"action": "ADD", "member": "user:jane@corp.com"}]}
+                    },
+                },
+            }
+        else:
+            entry = {
+                "timestamp": "2026-07-20T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "storage.buckets.list",
+                    "authenticationInfo": {"principalEmail": "jane@corp.com"},
+                },
+            }
+        return _FakeGcpRequest({"entries": [entry]})
+
+    def list_next(self, request, response):
+        return None
+
+
+class _FakePagingGcpLogging:
+    """Serves one entry per page, up to total_pages pages per distinct filter."""
+
+    def __init__(self, total_pages):
+        self.total_pages = total_pages
+        self._pages_served = {}
+
+    def entries(self):
+        return self
+
+    def _entry(self, body):
+        if "SetIamPolicy" in body.get("filter", ""):
+            return {"timestamp": "2026-01-05T00:00:00Z", "protoPayload": {"methodName": "SetIamPolicy"}}
+        return {"timestamp": "2026-07-20T00:00:00Z", "protoPayload": {"methodName": "storage.buckets.list"}}
+
+    def list(self, body):
+        request = _FakeGcpRequest({"entries": [self._entry(body)]})
+        request.body = body
+        return request
+
+    def list_next(self, request, response):
+        key = request.body.get("filter", "")
+        served = self._pages_served.get(key, 1)
+        if served >= self.total_pages:
+            return None
+        self._pages_served[key] = served + 1
+        return self.list(request.body)
+
+
+class _StubGcpCollector:
+    """GcpCollector wired to fakes; import deferred so the module stays optional."""
+
+    def __new__(cls, deny_lifecycle: bool = False):
+        from cloudsplaining.multicloud.collectors.gcp import GcpCollector
+
+        collector = GcpCollector(project_id="demo")
+        error = RuntimeError("Permission denied") if deny_lifecycle else None
+        collector._iam = _FakeGcpIam()
+        collector._crm = _FakeGcpCrm()
+        collector._policy_analyzer = _FakeGcpPolicyAnalyzer(error=error)
+        collector._logging = _FakeGcpLogging(error=error)
+        return collector
+
+
+class TestGcpLifecycleCollection(unittest.TestCase):
+    def test_collect_includes_service_account_activities(self):
+        snapshot = _StubGcpCollector().collect()
+        emails = [a["activity"]["serviceAccount"]["email"] for a in snapshot["serviceAccountActivities"]]
+        self.assertIn("sa@demo.iam.gserviceaccount.com", emails)
+
+    def test_collect_includes_audit_log_entries(self):
+        snapshot = _StubGcpCollector().collect()
+        methods = [e["protoPayload"]["methodName"] for e in snapshot["auditLogEntries"]]
+        self.assertIn("SetIamPolicy", methods)
+        self.assertIn("storage.buckets.list", methods)
+
+    def test_lifecycle_endpoints_fail_open(self):
+        snapshot = _StubGcpCollector(deny_lifecycle=True).collect()
+        self.assertEqual(snapshot["serviceAccountActivities"], [])
+        self.assertEqual(snapshot["auditLogEntries"], [])
+        self.assertEqual([sa["email"] for sa in snapshot["serviceAccounts"]], ["sa@demo.iam.gserviceaccount.com"])
+
+    def test_grant_audit_pass_is_page_capped(self):
+        # A Logging API scan over the retention window can serve hundreds of
+        # pages; the creation/grant pass must stop at a bounded page count.
+        collector = _StubGcpCollector()
+        collector._logging = _FakePagingGcpLogging(total_pages=60)
+        snapshot = collector.collect()
+        grants = [e for e in snapshot["auditLogEntries"] if e["protoPayload"]["methodName"] == "SetIamPolicy"]
+        self.assertLessEqual(len(grants), 30)
+
+    def test_gcp_snapshot_feeds_identity_inventory_lifecycle(self):
+        from cloudsplaining.identity_inventory.gcp import build_inventory
+
+        snapshot = _StubGcpCollector().collect()
+        records = {record.name: record for record in build_inventory(snapshot)}
+        self.assertEqual(
+            records["sa@demo.iam.gserviceaccount.com"].last_used,
+            datetime(2026, 7, 27, 7, 0, tzinfo=timezone.utc),
+        )
+        jane = records["jane@corp.com"]
+        self.assertEqual(jane.created_at, datetime(2026, 1, 5, tzinfo=timezone.utc))
+        self.assertEqual(jane.created_by, "admin@corp.com")
+        self.assertEqual(jane.last_used, datetime(2026, 7, 20, tzinfo=timezone.utc))
+
+
 class TestAzureGraphCollection(unittest.TestCase):
     def test_users_query_requests_lifecycle_fields(self):
         collector = _StubGraphAzureCollector(deny_sign_in_activity=False)

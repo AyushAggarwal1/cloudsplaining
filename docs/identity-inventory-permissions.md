@@ -31,6 +31,7 @@ A read-only role with the AWS-managed `SecurityAudit` policy covers all of the a
 
 ## GCP
 
+Enable - policyanalyzer.googleapis.com
 | Permission | What it powers | If missing |
 |---|---|---|
 | `iam.serviceAccounts.list` + `resourcemanager.projects.getIamPolicy` (e.g. `roles/viewer`) | **Core** — service accounts, binding members, structural classification, SA `created_at` | no identities |
