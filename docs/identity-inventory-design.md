@@ -89,7 +89,11 @@ No evidence means `unknown`, never a guess.
   `access_key` record whose `created_by` is the owning user (structural attribution that never
   expires), with `created_at` = last rotation and the key's own last-used date.
 - **OCI** — the collector serializes `capabilities`, `isMfaActivated`, `timeCreated`,
-  `lastSuccessfulLoginTime`, and `email` straight from `ListUsers` (no extra calls). Identity
+  `lastSuccessfulLoginTime`, and `email` straight from `ListUsers` (no extra calls). It also
+  pages OCI Audit `ListEvents` over the retention window (root compartment, page-capped, held a
+  day inside the service's 365-day `startTime` validation so paginated calls never race the clock)
+  and keeps `CreateUser`/`CreateDynamicGroup` events (`auditEvents` key) — `created_by`
+  attribution, failing open to null without the `read audit-events` permission. Identity
   Domains (SCIM) users carry capabilities in the
   `urn:ietf:params:scim:schemas:oracle:idcs:extension:capabilities:User` extension, which is read
   too. Precedence: machine-token name → MFA enrolled (current human state) → API-key-only

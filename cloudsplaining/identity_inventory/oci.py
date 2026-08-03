@@ -30,7 +30,8 @@ PROVIDER = "oci"
 USER_STATE_EXTENSION = "urn:ietf:params:scim:schemas:oracle:idcs:extension:userState:User"
 USER_CAPABILITIES_EXTENSION = "urn:ietf:params:scim:schemas:oracle:idcs:extension:capabilities:User"
 
-_CREATION_EVENT_SUFFIXES = ("createuser", "createdynamicgroup")
+#: Shared with the OCI collector, which pre-filters audit events to these kinds.
+CREATION_EVENT_SUFFIXES = ("createuser", "createdynamicgroup")
 
 
 def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
@@ -120,7 +121,7 @@ def _audit_creators(events: list[dict[str, Any]]) -> dict[str, str]:
     creators: dict[str, str] = {}
     for event in events:
         kind = str(get_field(event, "eventType") or get_field(event, "eventName") or "").lower()
-        if not kind.endswith(_CREATION_EVENT_SUFFIXES):
+        if not kind.endswith(CREATION_EVENT_SUFFIXES):
             continue
         payload = event.get("data") or {}
         identity = get_field(payload, "identity") or {}

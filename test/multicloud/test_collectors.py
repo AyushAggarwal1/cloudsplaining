@@ -1,10 +1,18 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from cloudsplaining.identity_inventory.azure import build_inventory as build_azure_inventory
 from cloudsplaining.multicloud.collectors import get_collector
 from cloudsplaining.multicloud.collectors.azure import AzureCollector
 from cloudsplaining.multicloud.collectors.base import Collector, CollectorDependencyError
+
+
+# Anchored to the wall clock because the collector's audit-window logic clamps
+# to the service's rolling 365-day retention bound; fixed dates would rot.
+_OCI_NOW = datetime.now(timezone.utc)
+_OCI_USER_CREATED = _OCI_NOW - timedelta(days=180)
+_OCI_DG_CREATED = _OCI_NOW - timedelta(days=120)
+_OCI_LAST_LOGIN = _OCI_NOW - timedelta(days=30)
 
 
 class _FakeIdentityClient:
@@ -25,8 +33,8 @@ class _FakeIdentityClient:
                 "name": "alice",
                 "description": None,
                 "email": "alice@corp.com",
-                "time_created": datetime(2025, 2, 1, tzinfo=timezone.utc),
-                "last_successful_login_time": datetime(2026, 7, 1, tzinfo=timezone.utc),
+                "time_created": _OCI_USER_CREATED,
+                "last_successful_login_time": _OCI_LAST_LOGIN,
                 "is_mfa_activated": False,
                 "capabilities": capabilities,
             },
@@ -38,7 +46,7 @@ class _FakeIdentityClient:
                 "id": "ocid.dynamicgroup.dg",
                 "name": "instances-dg",
                 "matching_rule": "instance.compartment.id = 'x'",
-                "time_created": datetime(2026, 3, 1, tzinfo=timezone.utc),
+                "time_created": _OCI_DG_CREATED,
             },
         )()
         self._group = type("G", (), {"id": "ocid.group.admins", "name": "Administrators", "description": None})()
@@ -73,6 +81,66 @@ class _FakeIdentityClient:
         return self._Resp([self._membership])
 
 
+def _audit_event(event_type, resource_name, principal_name):
+    identity = type("I", (), {"principal_name": principal_name})()
+    data = type("D", (), {"resource_name": resource_name, "identity": identity})()
+    return type(
+        "E",
+        (),
+        {
+            "event_type": event_type,
+            "event_time": datetime(2026, 7, 23, tzinfo=timezone.utc),
+            "data": data,
+        },
+    )()
+
+
+class _FakeAuditClient:
+    """Minimal stand-in for oci.audit.AuditClient."""
+
+    class _Resp:
+        def __init__(self, data, next_page=None):
+            self.data = data
+            self.next_page = next_page
+
+    def __init__(self, error=None):
+        self.error = error
+        self.windows = []
+
+    def list_events(self, compartment_id, start_time, end_time, page=None):
+        if self.error is not None:
+            raise self.error
+        # The real service validates the window on every call, including
+        # paginated ones issued after time has passed.
+        if start_time < datetime.now(timezone.utc) - timedelta(days=365):
+            raise RuntimeError("startTime can not be older than 365 days")
+        self.windows.append((start_time, end_time))
+        return self._Resp(
+            [
+                _audit_event("com.oraclecloud.identityControlPlane.CreateUser", "alice", "admin@corp.com"),
+                _audit_event("com.oraclecloud.computeApi.LaunchInstance", "web-vm", "admin@corp.com"),
+                _audit_event(
+                    "com.oraclecloud.identityControlPlane.CreateDynamicGroup", "instances-dg", "admin@corp.com"
+                ),
+            ]
+        )
+
+
+class _FakePagingAuditClient(_FakeAuditClient):
+    """Serves one creation event per page, up to total_pages pages."""
+
+    def __init__(self, total_pages):
+        super().__init__()
+        self.total_pages = total_pages
+        self.pages_served = 0
+
+    def list_events(self, compartment_id, start_time, end_time, page=None):
+        self.pages_served += 1
+        events = [_audit_event("com.oraclecloud.identityControlPlane.CreateUser", "alice", "admin@corp.com")]
+        next_page = str(self.pages_served) if self.pages_served < self.total_pages else None
+        return self._Resp(events, next_page=next_page)
+
+
 class TestCollectors(unittest.TestCase):
     def test_get_collector_aliases(self):
         self.assertEqual(get_collector("oci", tenancy_id="t", client=_FakeIdentityClient()).name, "oci")
@@ -105,13 +173,13 @@ class TestCollectors(unittest.TestCase):
         collector = get_collector("oci", tenancy_id="ocid.tenancy", client=_FakeIdentityClient())
         snapshot = collector.collect()
         user = snapshot["users"][0]
-        self.assertEqual(user["timeCreated"], datetime(2025, 2, 1, tzinfo=timezone.utc))
-        self.assertEqual(user["lastSuccessfulLoginTime"], datetime(2026, 7, 1, tzinfo=timezone.utc))
+        self.assertEqual(user["timeCreated"], _OCI_USER_CREATED)
+        self.assertEqual(user["lastSuccessfulLoginTime"], _OCI_LAST_LOGIN)
         self.assertIs(user["isMfaActivated"], False)
         self.assertEqual(user["email"], "alice@corp.com")
         self.assertEqual(user["capabilities"], {"canUseConsolePassword": False, "canUseApiKeys": True})
         dynamic_group = snapshot["dynamicGroups"][0]
-        self.assertEqual(dynamic_group["timeCreated"], datetime(2026, 3, 1, tzinfo=timezone.utc))
+        self.assertEqual(dynamic_group["timeCreated"], _OCI_DG_CREATED)
 
     def test_oci_snapshot_feeds_identity_inventory(self):
         from cloudsplaining.identity_inventory.oci import build_inventory
@@ -120,7 +188,7 @@ class TestCollectors(unittest.TestCase):
         records = {r.name: r for r in build_inventory(collector.collect())}
         # alice: API keys, no console password, no MFA -> machine service account.
         self.assertEqual(records["alice"].classification, "machine")
-        self.assertEqual(records["alice"].created_at, datetime(2025, 2, 1, tzinfo=timezone.utc))
+        self.assertEqual(records["alice"].created_at, _OCI_USER_CREATED)
         self.assertEqual(records["instances-dg"].classification, "machine")
 
     def test_oci_snapshot_round_trips_through_engine(self):
@@ -136,6 +204,77 @@ class TestCollectors(unittest.TestCase):
         self.assertTrue(issubclass(Collector, object))
         with self.assertRaises(TypeError):
             Collector()  # abstract
+
+
+class TestOciAuditCollection(unittest.TestCase):
+    def _collector(self, audit_client):
+        return get_collector("oci", tenancy_id="ocid.tenancy", client=_FakeIdentityClient(), audit_client=audit_client)
+
+    def test_collect_includes_creation_audit_events(self):
+        audit = _FakeAuditClient()
+        snapshot = self._collector(audit).collect()
+        self.assertIn(
+            {
+                "eventType": "com.oraclecloud.identityControlPlane.CreateUser",
+                "eventTime": datetime(2026, 7, 23, tzinfo=timezone.utc),
+                "data": {"resourceName": "alice", "identity": {"principalName": "admin@corp.com"}},
+            },
+            snapshot["auditEvents"],
+        )
+        # Non-creation events are dropped so snapshots stay small.
+        kinds = [event["eventType"] for event in snapshot["auditEvents"]]
+        self.assertNotIn("com.oraclecloud.computeApi.LaunchInstance", kinds)
+
+    def test_audit_queries_target_identity_creation_times(self):
+        # Creation events are emitted at ~timeCreated, so the collector queries
+        # a short window around each identity's creation instead of scanning
+        # the whole retention window, which takes minutes on active tenancies.
+        audit = _FakeAuditClient()
+        self._collector(audit).collect()
+        self.assertEqual(len(audit.windows), 2)
+        for (start_time, end_time), created in zip(audit.windows, [_OCI_USER_CREATED, _OCI_DG_CREATED]):
+            self.assertLessEqual(start_time, created)
+            self.assertGreaterEqual(end_time, created)
+            self.assertLessEqual(end_time - start_time, timedelta(hours=1))
+
+    def test_identities_outside_retention_are_not_queried(self):
+        # Their creation events are beyond the audit service's 365-day
+        # retention, so a query could only fail validation or return nothing.
+        identity = _FakeIdentityClient()
+        identity._user.time_created = _OCI_NOW - timedelta(days=400)
+        identity._dynamic_group.time_created = _OCI_NOW - timedelta(days=400)
+        audit = _FakeAuditClient()
+        collector = get_collector("oci", tenancy_id="ocid.tenancy", client=identity, audit_client=audit)
+        with self.assertNoLogs("cloudsplaining.multicloud.collectors.oci", level="WARNING"):
+            snapshot = collector.collect()
+        self.assertEqual(audit.windows, [])
+        self.assertEqual(snapshot["auditEvents"], [])
+
+    def test_audit_events_fail_open(self):
+        snapshot = self._collector(_FakeAuditClient(error=RuntimeError("NotAuthorizedOrNotFound"))).collect()
+        self.assertEqual(snapshot["auditEvents"], [])
+        self.assertEqual([u["name"] for u in snapshot["users"]], ["alice"])
+
+    def test_audit_events_skipped_without_audit_client(self):
+        # Injected-identity-client mode must not build a real AuditClient.
+        collector = get_collector("oci", tenancy_id="ocid.tenancy", client=_FakeIdentityClient())
+        self.assertEqual(collector.collect()["auditEvents"], [])
+
+    def test_audit_scan_is_page_capped(self):
+        # A year of root-compartment audit events can span many pages and the
+        # API has no server-side event-type filter; the scan must stay bounded.
+        audit = _FakePagingAuditClient(total_pages=300)
+        snapshot = self._collector(audit).collect()
+        self.assertLessEqual(audit.pages_served, 100)
+        self.assertTrue(snapshot["auditEvents"])
+
+    def test_snapshot_with_audit_events_feeds_created_by(self):
+        from cloudsplaining.identity_inventory.oci import build_inventory
+
+        snapshot = self._collector(_FakeAuditClient()).collect()
+        records = {record.name: record for record in build_inventory(snapshot)}
+        self.assertEqual(records["alice"].created_by, "admin@corp.com")
+        self.assertEqual(records["instances-dg"].created_by, "admin@corp.com")
 
 
 class _StubGraphAzureCollector(AzureCollector):

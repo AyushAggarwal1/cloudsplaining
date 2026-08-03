@@ -3,6 +3,14 @@
 Pulls users, groups, dynamic-groups, policies, and group memberships from the
 OCI Identity service, returning the snapshot dict the OCI engine consumes.
 
+Also collects the optional identity-lifecycle enrichment the inventory builder
+understands (see ``cloudsplaining/identity_inventory/oci.py``):
+
+- ``auditEvents`` — CreateUser / CreateDynamicGroup events from the OCI Audit
+  service (needs ``Allow group <X> to read audit-events in tenancy``), which
+  power ``created_by``. Fails open: without the permission the key is emitted
+  as an empty list and ``created_by`` stays null.
+
 Requires ``pip install 'cloudsplaining[oci]'`` (oci). Authentication uses the
 standard OCI config file (``~/.oci/config``) / instance principals.
 """
@@ -14,9 +22,24 @@ standard OCI config file (``~/.oci/config``) / instance principals.
 # or https://opensource.org/licenses/BSD-3-Clause
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from cloudsplaining.identity_inventory.oci import CREATION_EVENT_SUFFIXES
 from cloudsplaining.multicloud.collectors.base import Collector
+
+logger = logging.getLogger(__name__)
+
+#: OCI Audit retains 365 days but rejects startTime older than that *at request
+#: time* — validated again on every paginated call — so stay a day inside it.
+_AUDIT_LOOKBACK_DAYS = 364
+#: Creation events carry the operation time, but audit-pipeline clock skew can
+#: place them slightly off the resource's timeCreated.
+_AUDIT_WINDOW_PADDING = timedelta(minutes=15)
+#: Global page budget across all windows: list_events has no server-side
+#: event-type filter and busy root compartments emit large pages of noise.
+_AUDIT_PAGE_LIMIT = 100
 
 
 class OciCollector(Collector):
@@ -29,22 +52,27 @@ class OciCollector(Collector):
         config_profile: str = "DEFAULT",
         config_file: str | None = None,
         client: Any | None = None,
+        audit_client: Any | None = None,
         **_: Any,
     ) -> None:
         self._tenancy_id = tenancy_id
         self._config_profile = config_profile
         self._config_file = config_file
         self._client = client
+        self._audit_client = audit_client
+
+    def _config(self, oci: Any) -> dict[str, Any]:
+        kwargs: dict[str, str] = {"profile_name": self._config_profile}
+        if self._config_file:
+            kwargs["file_location"] = self._config_file
+        return oci.config.from_file(**kwargs)
 
     def client(self) -> tuple[Any, str]:
         """Return (IdentityClient, tenancy_ocid)."""
         if self._client is not None:
             return self._client, (self._tenancy_id or "")
         oci = self._import("oci")
-        kwargs: dict[str, str] = {"profile_name": self._config_profile}
-        if self._config_file:
-            kwargs["file_location"] = self._config_file
-        config = oci.config.from_file(**kwargs)
+        config = self._config(oci)
         tenancy = self._tenancy_id or config["tenancy"]
         return oci.identity.IdentityClient(config), tenancy
 
@@ -62,6 +90,89 @@ class OciCollector(Collector):
             "dynamicGroups": [self._dynamic_group(d) for d in dynamic_groups],
             "policies": policies,
             "groupMemberships": memberships,
+            "auditEvents": self._audit_events(
+                tenancy, [getattr(obj, "time_created", None) for obj in users + dynamic_groups]
+            ),
+        }
+
+    # ------------------------------------------------------------- lifecycle
+    def _audit_events(self, tenancy: str, creation_times: list[Any]) -> list[dict[str, Any]]:
+        """Identity-creation audit events; they power created_by in the identity inventory.
+
+        Queries short windows around each identity's timeCreated (where its
+        creation event lives) rather than scanning the whole retention window,
+        which takes minutes on active tenancies.
+        """
+        try:
+            client = self._audit_client_or_none()
+            if client is None:
+                return []
+            events: list[dict[str, Any]] = []
+            budget = _AUDIT_PAGE_LIMIT
+            for start_time, end_time in self._creation_windows(creation_times):
+                page = None
+                while budget > 0:
+                    budget -= 1
+                    kwargs: dict[str, Any] = {"compartment_id": tenancy, "start_time": start_time, "end_time": end_time}
+                    if page:
+                        kwargs["page"] = page
+                    resp = client.list_events(**kwargs)
+                    events.extend(event for event in map(self._creation_event, resp.data) if event is not None)
+                    page = resp.next_page
+                    if not page:
+                        break
+                if budget <= 0:
+                    break
+            return events
+        except Exception as error:
+            logger.warning("Skipping auditEvents (created_by will be null): %s", error)
+            return []
+
+    def _audit_client_or_none(self) -> Any | None:
+        if self._audit_client is not None:
+            return self._audit_client
+        if self._client is not None:
+            # Injected-identity-client mode has no OCI config to build a real client from.
+            return None
+        oci = self._import("oci")
+        return oci.audit.AuditClient(self._config(oci))
+
+    @staticmethod
+    def _creation_windows(creation_times: list[Any]) -> list[tuple[datetime, datetime]]:
+        """Merged, padded query windows around identity creation times, clamped to retention."""
+        now = datetime.now(timezone.utc)
+        floor = now - timedelta(days=_AUDIT_LOOKBACK_DAYS)
+        times = []
+        for value in creation_times:
+            if not isinstance(value, datetime):
+                continue
+            aware = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            if aware >= floor:
+                times.append(aware)
+        windows: list[tuple[datetime, datetime]] = []
+        for time in sorted(times):
+            start = max(time - _AUDIT_WINDOW_PADDING, floor)
+            end = min(time + _AUDIT_WINDOW_PADDING, now)
+            if windows and start <= windows[-1][1]:
+                windows[-1] = (windows[-1][0], max(end, windows[-1][1]))
+            else:
+                windows.append((start, end))
+        return windows
+
+    @staticmethod
+    def _creation_event(obj: Any) -> dict[str, Any] | None:
+        event_type = str(getattr(obj, "event_type", None) or "")
+        if not event_type.lower().endswith(CREATION_EVENT_SUFFIXES):
+            return None
+        data = getattr(obj, "data", None)
+        identity = getattr(data, "identity", None)
+        return {
+            "eventType": event_type,
+            "eventTime": getattr(obj, "event_time", None),
+            "data": {
+                "resourceName": getattr(data, "resource_name", None),
+                "identity": {"principalName": getattr(identity, "principal_name", None)},
+            },
         }
 
     # ----------------------------------------------------------------- helpers
