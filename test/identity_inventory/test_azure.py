@@ -94,6 +94,27 @@ class TestAzureInventory(unittest.TestCase):
         self.assertEqual(_by_id(records, "u1").created_by, "admin@contoso.com")
         self.assertEqual(_by_id(records, "sp1").created_by, "Terraform")
 
+    def test_invited_guest_created_by_from_invite_audit(self):
+        # B2B guests are logged as 'Invite external user', not 'Add user';
+        # the inviter is the meaningful creator.
+        data = _snapshot()
+        data["users"].append(
+            {
+                "id": "u3",
+                "userPrincipalName": "partner_example.com#EXT#@contoso.onmicrosoft.com",
+                "displayName": "Partner",
+                "createdDateTime": "2026-08-01T00:00:00Z",
+            }
+        )
+        data["directoryAudits"] = [
+            {
+                "activityDisplayName": "Invite external user",
+                "initiatedBy": {"user": {"userPrincipalName": "admin@contoso.com"}},
+                "targetResources": [{"id": "u3", "displayName": "Partner"}],
+            }
+        ]
+        self.assertEqual(_by_id(build_inventory(data), "u3").created_by, "admin@contoso.com")
+
     def test_unknowns_are_none(self):
         sp2 = _by_id(build_inventory(_snapshot()), "sp2")
         self.assertIsNone(sp2.created_at)

@@ -81,6 +81,11 @@ class TestGetCredentialReport(unittest.TestCase):
         self.assertIn("CreateAccessKey", CLOUDTRAIL_CREATE_EVENT_NAMES)
         self.assertIn("CreateLoginProfile", CLOUDTRAIL_CREATE_EVENT_NAMES)
 
+    def test_event_names_include_service_linked_role_creation(self):
+        # Service-linked roles are created via CreateServiceLinkedRole, not
+        # CreateRole; without it every SLR loses created_by attribution.
+        self.assertIn("CreateServiceLinkedRole", CLOUDTRAIL_CREATE_EVENT_NAMES)
+
 
 class _DeniedSupplementClient:
     """Stand-in for an IAM client denied on all per-user credential lookups."""

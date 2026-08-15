@@ -9,7 +9,7 @@ fields. Optional enrichment keys on the same dict:
   ``reports/servicePrincipalSignInActivities`` API — fills service-principal
   ``last_used`` (matched by ``appId``).
 - ``directoryAudits``: directory audit log entries — fills ``created_by`` from
-  "Add user" / "Add service principal" activities.
+  "Add user" / "Add service principal" / "Invite external user" activities.
 """
 
 # Copyright (c) 2020, salesforce.com, inc.
@@ -27,7 +27,7 @@ from cloudsplaining.identity_inventory.parsing import get_field, max_timestamp, 
 
 PROVIDER = "azure"
 
-_CREATION_ACTIVITIES = ("Add user", "Add service principal")
+_CREATION_ACTIVITIES = ("Add user", "Add service principal", "Invite external user")
 
 _SYNC_UPN_PREFIX = "sync_"
 _SYNC_DISPLAY_NAME = "on-premises directory synchronization service account"

@@ -304,6 +304,11 @@ def _creators(events: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
             creators["user", parameters["userName"]] = creator
         elif event_name == "CreateRole" and parameters.get("roleName"):
             creators["role", parameters["roleName"]] = creator
+        elif event_name == "CreateServiceLinkedRole":
+            # The request only names the service; the created role is in the response.
+            role = (event.get("responseElements") or {}).get("role") or {}
+            if role.get("roleName"):
+                creators["role", role["roleName"]] = creator
     return creators
 
 

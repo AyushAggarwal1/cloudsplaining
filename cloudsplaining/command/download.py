@@ -130,9 +130,16 @@ def _cloudtrail_client(session_data: dict[str, str]) -> Any:  # noqa: ANN401 - n
 
 
 #: IAM identity- and credential-creation events for the identity inventory:
-#: CreateUser/CreateRole resolve created_by; CreateAccessKey/CreateLoginProfile
-#: classify users the cached credential report predates.
-CLOUDTRAIL_CREATE_EVENT_NAMES = ("CreateUser", "CreateRole", "CreateAccessKey", "CreateLoginProfile")
+#: CreateUser/CreateRole/CreateServiceLinkedRole resolve created_by;
+#: CreateAccessKey/CreateLoginProfile classify users the cached credential
+#: report predates.
+CLOUDTRAIL_CREATE_EVENT_NAMES = (
+    "CreateUser",
+    "CreateRole",
+    "CreateServiceLinkedRole",
+    "CreateAccessKey",
+    "CreateLoginProfile",
+)
 
 
 def get_cloudtrail_create_events(

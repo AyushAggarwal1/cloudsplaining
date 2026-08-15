@@ -83,9 +83,11 @@ No evidence means `unknown`, never a guess.
   performs live per-user lookups (`iam:ListAccessKeys` / `iam:GetLoginProfile` /
   `iam:ListMFADevices`, all inside `SecurityAudit`) stored under `credentialSupplement`.
   `download` also pages CloudTrail `LookupEvents` for
-  `CreateUser`/`CreateRole`/`CreateAccessKey`/`CreateLoginProfile` (`cloudTrailEvents` key;
-  `--skip-cloudtrail-events` opts out) — `created_by` attribution plus credential-shape
-  corroboration for report-gap users. Each existing access key additionally becomes a child
+  `CreateUser`/`CreateRole`/`CreateServiceLinkedRole`/`CreateAccessKey`/`CreateLoginProfile`
+  (`cloudTrailEvents` key; `--skip-cloudtrail-events` opts out) — `created_by` attribution plus
+  credential-shape corroboration for report-gap users (`CreateServiceLinkedRole` names the created
+  role only in `responseElements.role`, which the builder reads). CloudTrail event history reaches
+  back 90 days, so identities created earlier stay null. Each existing access key additionally becomes a child
   `access_key` record whose `created_by` is the owning user (structural attribution that never
   expires), with `created_at` = last rotation and the key's own last-used date.
 - **OCI** — the collector serializes `capabilities`, `isMfaActivated`, `timeCreated`,
@@ -96,8 +98,12 @@ No evidence means `unknown`, never a guess.
   page-capped per window and globally so noisy tenancies stay fast. Kept
   `CreateUser`/`CreateDynamicGroup` events (`auditEvents` key) power `created_by` — first event
   per name wins, so a deleted namesake's older event never overrides the current identity.
-  Fails open to null without the `read audit-events` permission; identities older than the
-  retention window stay null. Identity
+  Fails open to null without the `read audit-events` permission. For identities older than the
+  audit retention window the collector additionally lists Identity Domains (SCIM) users per
+  domain (`list_domains` → `IdentityDomainsClient.list_users` with
+  `userName,ocid,idcsCreatedBy`) and merges `idcsCreatedBy` onto matching users — stored on the
+  user, it never ages out — failing open on tenancies without Identity Domains or the `read
+  domains` permission. Identity
   Domains (SCIM) users carry capabilities in the
   `urn:ietf:params:scim:schemas:oracle:idcs:extension:capabilities:User` extension, which is read
   too. Precedence: machine-token name → MFA enrolled (current human state) → API-key-only
@@ -106,7 +112,11 @@ No evidence means `unknown`, never a guess.
   `unknown`.
 - **Azure** — the collector requests `createdDateTime`, `userType`, `accountEnabled`, and
   `signInActivity` for users (falling back without `signInActivity` when the tenant lacks
-  `AuditLog.Read.All` / Entra ID P1) and `createdDateTime` for service principals. Interactive
+  `AuditLog.Read.All` / Entra ID P1) and `createdDateTime` for service principals. `created_by`
+  comes from directory audits filtered to `Add user` / `Add service principal` /
+  `Invite external user` (the B2B guest path, where the inviter is the creator); Entra keeps
+  those entries 30 days on P1/P2 tenants and only 7 days on free tenants, and Microsoft Graph
+  stores no creator on the objects themselves, so identities created earlier stay null. Interactive
   sign-ins → human; only non-interactive → machine; never signed in (with data available) →
   `unknown`; no sign-in data tenant-wide → soft human default with the reason stating so.
   Well-known AD Connect sync accounts (`Sync_*` UPNs, the on-premises directory synchronization
@@ -115,6 +125,12 @@ No evidence means `unknown`, never a guess.
   classification signal. Human users' lifecycle comes from Admin Activity audit logs
   (`auditLogEntries`): their newest logged activity → `last_used`, and the first `SetIamPolicy`
   grant that added the `user:` member → proxy `created_at` + `created_by` (~400-day window).
+  The collector issues **separate** capped queries: rare `CreateServiceAccount` events get their
+  own budget covering the whole retention window (grant noise cannot page them out — the IAM API
+  itself exposes no service-account creation time, so these events are the only source of SA
+  `created_at`/`created_by`), while the high-volume `SetIamPolicy` budget is split between the
+  oldest retained entries (earliest-grant proxy) and the newest (recently added users), leaving
+  only the middle of a very busy window uncovered.
   The Workspace Admin SDK scope (`admin.directory.user.readonly`) is deliberately **not**
   required; a Workspace `users.list` export is honored if supplied (`creationTime` authoritative,
   `lastLoginTime` merged into `last_used`).
@@ -143,7 +159,7 @@ Every record carries `classification_reason` — a stable string the platform ma
 |---|---|---|---|---|
 | `created_at` | `CreateDate` (authorization details) | `createdDateTime` | SAs: `createTime` if exported, else audit-log `CreateServiceAccount` entry; users: Workspace `creationTime` if supplied, else first `SetIamPolicy` audit entry that ADDed the `user:` member | `time-created` / `meta.created` |
 | `last_used` | roles: `RoleLastUsed.LastUsedDate`; users: max of credential-report `password_last_used`, `access_key_*_last_used_date` | users: max of `signInActivity.{lastSignInDateTime,lastNonInteractiveSignInDateTime}`; SPs: `servicePrincipalSignInActivities` (by `appId`) | SAs: Policy Analyzer `serviceAccountLastAuthentication` (`lastAuthenticatedTime`); users: newest of audit-log activity (`authenticationInfo.principalEmail`) and Workspace `lastLoginTime` if supplied | `lastSuccessfulLoginTime` / identity-domains `userState.lastSuccessfulLoginDate` |
-| `created_by` | optional `cloudTrailEvents` (`CreateUser`/`CreateRole`, raw LookupEvents or simplified) | optional `directoryAudits` (`Add user` / `Add service principal`, `initiatedBy`) | SAs: `CreateServiceAccount` caller; users: `SetIamPolicy` granter (audit logs) | `idcsCreatedBy` (identity domains) or optional `auditEvents` |
+| `created_by` | optional `cloudTrailEvents` (`CreateUser`/`CreateRole`/`CreateServiceLinkedRole`, raw LookupEvents or simplified) | optional `directoryAudits` (`Add user` / `Add service principal` / `Invite external user`, `initiatedBy`) | SAs: `CreateServiceAccount` caller; users: `SetIamPolicy` granter (audit logs) | `idcsCreatedBy` (identity domains) or optional `auditEvents` |
 | `age_days` | derived: `(reference_time - created_at).days` | ← | ← | ← |
 | `days_since_last_used` | derived: `(reference_time - last_used).days`; `None` when never used/unknown | ← | ← | ← |
 

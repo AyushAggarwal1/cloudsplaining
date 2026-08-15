@@ -34,10 +34,13 @@ _USER_SELECT = "id,userPrincipalName,displayName,accountEnabled,userType,created
 _USER_SELECT_WITH_SIGN_INS = _USER_SELECT + ",signInActivity"
 _SP_SELECT = "id,appId,displayName,servicePrincipalType,accountEnabled,createdDateTime"
 
-# created_by attribution (needs AuditLog.Read.All; ~30-day retention).
+# created_by attribution (needs AuditLog.Read.All; retention is 30 days on
+# Entra ID P1/P2 tenants and only 7 days on free tenants). B2B guests are
+# logged as 'Invite external user' rather than 'Add user'.
 _DIRECTORY_AUDITS_PATH = (
     "/auditLogs/directoryAudits?$filter="
     "activityDisplayName eq 'Add user' or activityDisplayName eq 'Add service principal'"
+    " or activityDisplayName eq 'Invite external user'"
 )
 # Service-principal last-used (needs Reports.Read.All; beta-only endpoint).
 _SP_SIGN_INS_URL = "https://graph.microsoft.com/beta/reports/servicePrincipalSignInActivities"

@@ -36,11 +36,18 @@ from cloudsplaining.multicloud.collectors.base import Collector
 logger = logging.getLogger(__name__)
 
 #: Newest-first pages of general Admin Activity entries fetched for human
-#: users' last_used; creation/grant events are fetched separately without a cap.
+#: users' last_used; creation/grant events are fetched separately.
 _ACTIVITY_PAGE_LIMIT = 3
-#: The creation/grant pass scans the whole retention window server-side, which
-#: on active projects yields many sparse pages; bound it so collect() finishes.
-_GRANT_PAGE_LIMIT = 30
+#: CreateServiceAccount events are rare, so a small budget covers the whole
+#: ~400-day retention window; keeping them out of the SetIamPolicy query means
+#: grant noise can never starve them out (every SA would lose created_at/by).
+_CREATION_PAGE_LIMIT = 5
+#: SetIamPolicy is high-volume on active projects, so the grant budget is split
+#: between the oldest retained entries (earliest-grant proxy for long-lived
+#: users) and the newest (recently added users); only the middle of a very busy
+#: window goes uncovered.
+_GRANT_PAGE_LIMIT_ASC = 15
+_GRANT_PAGE_LIMIT_DESC = 15
 _PAGE_SIZE = 1000
 
 
@@ -162,33 +169,33 @@ class GcpCollector(Collector):
 
     def _audit_log_entries(self) -> list[dict[str, Any]]:
         log_filter = f'logName="projects/{self.project_id}/logs/cloudaudit.googleapis.com%2Factivity"'
+        base = {"resourceNames": [f"projects/{self.project_id}"], "pageSize": _PAGE_SIZE}
         entries: list[dict[str, Any]] = []
         # Newest-first general activity, capped: enough to derive human users'
         # last_used without paging through the whole 400-day retention window.
         entries.extend(
             self._log_entries(
-                {
-                    "resourceNames": [f"projects/{self.project_id}"],
-                    "filter": log_filter,
-                    "orderBy": "timestamp desc",
-                    "pageSize": _PAGE_SIZE,
-                },
+                {**base, "filter": log_filter, "orderBy": "timestamp desc"},
                 page_limit=_ACTIVITY_PAGE_LIMIT,
             )
         )
-        # Creation/grant events: created_at/created_by need the oldest
-        # CreateServiceAccount and SetIamPolicy entries still retained.
+        # Service-account creations: their own low-volume query, so grant noise
+        # cannot page them out of budget (the API pages oldest-first by default).
         entries.extend(
             self._log_entries(
-                {
-                    "resourceNames": [f"projects/{self.project_id}"],
-                    "filter": (
-                        f'{log_filter} AND (protoPayload.methodName:"SetIamPolicy"'
-                        ' OR protoPayload.methodName:"CreateServiceAccount")'
-                    ),
-                    "pageSize": _PAGE_SIZE,
-                },
-                page_limit=_GRANT_PAGE_LIMIT,
+                {**base, "filter": f'{log_filter} AND protoPayload.methodName:"CreateServiceAccount"'},
+                page_limit=_CREATION_PAGE_LIMIT,
+            )
+        )
+        # User grants: earliest retained first for the first-grant proxy, then a
+        # newest-first pass so recently added users are covered even when the
+        # window holds more grant entries than the ascending budget reaches.
+        grant_filter = f'{log_filter} AND protoPayload.methodName:"SetIamPolicy"'
+        entries.extend(self._log_entries({**base, "filter": grant_filter}, page_limit=_GRANT_PAGE_LIMIT_ASC))
+        entries.extend(
+            self._log_entries(
+                {**base, "filter": grant_filter, "orderBy": "timestamp desc"},
+                page_limit=_GRANT_PAGE_LIMIT_DESC,
             )
         )
         return entries

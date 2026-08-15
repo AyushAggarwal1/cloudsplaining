@@ -10,6 +10,10 @@ understands (see ``cloudsplaining/identity_inventory/oci.py``):
   service (needs ``Allow group <X> to read audit-events in tenancy``), which
   power ``created_by``. Fails open: without the permission the key is emitted
   as an empty list and ``created_by`` stays null.
+- ``idcsCreatedBy`` on each user — creator recorded by Identity Domains (needs
+  ``Allow group <X> to read domains in tenancy`` plus user read on the domain).
+  Stored on the user, so unlike audit events it never ages out of retention.
+  Fails open: tenancies without Identity Domains keep audit-only attribution.
 
 Requires ``pip install 'cloudsplaining[oci]'`` (oci). Authentication uses the
 standard OCI config file (``~/.oci/config``) / instance principals.
@@ -45,6 +49,10 @@ _AUDIT_WINDOW_PAGE_LIMIT = 5
 #: Global page budget across all windows: bounds collect() wall time on
 #: tenancies with many distinct creation days.
 _AUDIT_PAGE_LIMIT = 100
+#: SCIM paging for Identity Domains user listings; the cap bounds collect()
+#: wall time on very large domains (10k users covered).
+_DOMAIN_USER_PAGE_SIZE = 500
+_DOMAIN_USER_PAGE_LIMIT = 20
 
 
 class OciCollector(Collector):
@@ -58,6 +66,7 @@ class OciCollector(Collector):
         config_file: str | None = None,
         client: Any | None = None,
         audit_client: Any | None = None,
+        identity_domains_clients: list[Any] | None = None,
         **_: Any,
     ) -> None:
         self._tenancy_id = tenancy_id
@@ -65,6 +74,7 @@ class OciCollector(Collector):
         self._config_file = config_file
         self._client = client
         self._audit_client = audit_client
+        self._identity_domains_clients = identity_domains_clients
 
     def _config(self, oci: Any) -> dict[str, Any]:
         kwargs: dict[str, str] = {"profile_name": self._config_profile}
@@ -88,9 +98,11 @@ class OciCollector(Collector):
         dynamic_groups = self._list(client.list_dynamic_groups, tenancy)
         policies = self._policies(client, tenancy)
         memberships = self._memberships(client, tenancy, users, groups)
+        user_payloads = [self._user(u) for u in users]
+        self._merge_idcs_created_by(user_payloads, client, tenancy)
 
         return {
-            "users": [self._user(u) for u in users],
+            "users": user_payloads,
             "groups": [self._named(g) for g in groups],
             "dynamicGroups": [self._dynamic_group(d) for d in dynamic_groups],
             "policies": policies,
@@ -134,6 +146,63 @@ class OciCollector(Collector):
         except Exception as error:
             logger.warning("Skipping auditEvents (created_by will be null): %s", error)
             return []
+
+    def _merge_idcs_created_by(self, users: list[dict[str, Any]], client: Any, tenancy: str) -> None:
+        """Annotate users with the creator Identity Domains stores on them.
+
+        ``idcsCreatedBy`` never ages out, so it attributes users created before
+        the audit service's retention window began. Best-effort: tenancies
+        without Identity Domains (or without the permission) keep audit-only
+        attribution.
+        """
+        try:
+            creators: dict[str, dict[str, Any]] = {}
+            for domains_client in self._domains_clients(client, tenancy):
+                for user in self._domain_users(domains_client):
+                    created_by = getattr(user, "idcs_created_by", None)
+                    if created_by is None:
+                        continue
+                    entry = {
+                        "display": getattr(created_by, "display", None),
+                        "value": getattr(created_by, "value", None),
+                    }
+                    for key in (getattr(user, "ocid", None), getattr(user, "user_name", None)):
+                        if key:
+                            creators.setdefault(key, entry)
+            for user in users:
+                entry = creators.get(user.get("id") or "") or creators.get(user.get("name") or "")
+                if entry:
+                    user["idcsCreatedBy"] = entry
+        except Exception as error:
+            logger.warning("Skipping Identity Domains enrichment (idcsCreatedBy unavailable): %s", error)
+
+    def _domains_clients(self, client: Any, tenancy: str) -> list[Any]:
+        if self._identity_domains_clients is not None:
+            return self._identity_domains_clients
+        if self._client is not None:
+            # Injected-identity-client mode has no OCI config to build clients from.
+            return []
+        oci = self._import("oci")
+        config = self._config(oci)
+        domains = self._list(client.list_domains, tenancy)
+        return [oci.identity_domains.IdentityDomainsClient(config, domain.url) for domain in domains]
+
+    @staticmethod
+    def _domain_users(client: Any) -> list[Any]:
+        users: list[Any] = []
+        start_index = 1
+        for _ in range(_DOMAIN_USER_PAGE_LIMIT):
+            resp = client.list_users(
+                attributes="userName,ocid,idcsCreatedBy",
+                count=_DOMAIN_USER_PAGE_SIZE,
+                start_index=start_index,
+            )
+            resources = list(getattr(resp.data, "resources", None) or [])
+            users.extend(resources)
+            if len(resources) < _DOMAIN_USER_PAGE_SIZE:
+                break
+            start_index += len(resources)
+        return users
 
     def _audit_client_or_none(self) -> Any | None:
         if self._audit_client is not None:

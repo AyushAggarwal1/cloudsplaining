@@ -165,6 +165,21 @@ class TestAwsInventory(unittest.TestCase):
             _by_name(records, "app-server-role").created_by, "arn:aws:iam::111122223333:user/svc-terraform"
         )
 
+    def test_service_linked_role_creation_event_fills_created_by(self):
+        # CreateServiceLinkedRole carries the service name in requestParameters;
+        # the created role's name only appears in the response.
+        data = _authz_details()
+        data["cloudTrailEvents"] = [
+            {
+                "eventName": "CreateServiceLinkedRole",
+                "requestParameters": {"awsServiceName": "support.amazonaws.com"},
+                "responseElements": {"role": {"roleName": "AWSServiceRoleForSupport"}},
+                "userIdentity": {"arn": "arn:aws:iam::111122223333:user/admin-joe"},
+            }
+        ]
+        role = _by_name(build_inventory(data), "AWSServiceRoleForSupport")
+        self.assertEqual(role.created_by, "arn:aws:iam::111122223333:user/admin-joe")
+
     def test_created_by_unknown_without_events(self):
         self.assertIsNone(_by_name(build_inventory(_authz_details()), "alice").created_by)
 

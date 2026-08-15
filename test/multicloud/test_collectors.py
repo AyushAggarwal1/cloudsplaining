@@ -207,6 +207,64 @@ class TestCollectors(unittest.TestCase):
             Collector()  # abstract
 
 
+class _FakeIdentityDomainsClient:
+    """Minimal stand-in for oci.identity_domains.IdentityDomainsClient."""
+
+    class _Resp:
+        def __init__(self, data):
+            self.data = data
+
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+
+    def list_users(self, attributes=None, count=None, start_index=None):
+        if self.error is not None:
+            raise self.error
+        self.calls.append((attributes, count, start_index))
+        created_by = type("CB", (), {"display": "domain-admin@corp.com", "value": "ocid.user.domain-admin"})()
+        user = type("DU", (), {"ocid": "ocid.user.alice", "user_name": "alice", "idcs_created_by": created_by})()
+        return self._Resp(type("Users", (), {"resources": [user] if start_index == 1 else []})())
+
+
+class TestOciIdentityDomains(unittest.TestCase):
+    def _collector(self, domains_client):
+        return get_collector(
+            "oci",
+            tenancy_id="ocid.tenancy",
+            client=_FakeIdentityClient(),
+            identity_domains_clients=[domains_client],
+        )
+
+    def test_identity_domains_created_by_merged_into_users(self):
+        snapshot = self._collector(_FakeIdentityDomainsClient()).collect()
+        self.assertEqual(
+            snapshot["users"][0]["idcsCreatedBy"],
+            {"display": "domain-admin@corp.com", "value": "ocid.user.domain-admin"},
+        )
+
+    def test_identity_domains_attribution_outlives_audit_retention(self):
+        from cloudsplaining.identity_inventory.oci import build_inventory
+
+        # idcsCreatedBy is stored on the user, so it attributes identities whose
+        # creation events left the 365-day audit window long ago.
+        identity = _FakeIdentityClient()
+        identity._user.time_created = _OCI_NOW - timedelta(days=900)
+        collector = get_collector(
+            "oci",
+            tenancy_id="ocid.tenancy",
+            client=identity,
+            identity_domains_clients=[_FakeIdentityDomainsClient()],
+        )
+        records = {record.name: record for record in build_inventory(collector.collect())}
+        self.assertEqual(records["alice"].created_by, "domain-admin@corp.com")
+
+    def test_identity_domains_enrichment_fails_open(self):
+        snapshot = self._collector(_FakeIdentityDomainsClient(error=RuntimeError("NotAuthorizedOrNotFound"))).collect()
+        self.assertEqual([u["name"] for u in snapshot["users"]], ["alice"])
+        self.assertNotIn("idcsCreatedBy", snapshot["users"][0])
+
+
 class TestOciAuditCollection(unittest.TestCase):
     def _collector(self, audit_client):
         return get_collector("oci", tenancy_id="ocid.tenancy", client=_FakeIdentityClient(), audit_client=audit_client)
@@ -465,6 +523,62 @@ class _FakePagingGcpLogging:
         return self.list(request.body)
 
 
+class _BusyProjectGcpLogging:
+    """Emulates a busy project's Admin Activity log with real filter/order semantics.
+
+    A wall of SetIamPolicy grants (oldest-first: old@corp.com added early,
+    recent@corp.com added last) buries one CreateServiceAccount event in the
+    middle of the retention window. One entry per page so page caps bite.
+    """
+
+    def __init__(self, grant_count=100):
+        def grant(index, member):
+            return {
+                "timestamp": f"2025-{1 + index // 28:02d}-{1 + index % 28:02d}T00:00:00Z",
+                "protoPayload": {
+                    "methodName": "SetIamPolicy",
+                    "authenticationInfo": {"principalEmail": "admin@corp.com"},
+                    "serviceData": {"policyDelta": {"bindingDeltas": [{"action": "ADD", "member": member}]}},
+                },
+            }
+
+        self._entries = [grant(i, "user:old@corp.com" if i < 3 else "user:noise@corp.com") for i in range(grant_count)]
+        self._entries[grant_count // 2] = {
+            "timestamp": self._entries[grant_count // 2]["timestamp"],
+            "protoPayload": {
+                "methodName": "google.iam.admin.v1.CreateServiceAccount",
+                "authenticationInfo": {"principalEmail": "creator@corp.com"},
+                "response": {"email": "buried-sa@demo.iam.gserviceaccount.com"},
+            },
+        }
+        # Recent but not among the newest few entries, so the capped newest-first
+        # *activity* pass cannot rescue it by accident.
+        self._entries[grant_count - 6] = grant(grant_count - 6, "user:recent@corp.com")
+
+    def entries(self):
+        return self
+
+    def _matching(self, body):
+        methods = [m for m in ("SetIamPolicy", "CreateServiceAccount") if f'methodName:"{m}"' in body.get("filter", "")]
+        selected = [
+            e for e in self._entries if not methods or any(m in e["protoPayload"]["methodName"] for m in methods)
+        ]
+        return sorted(selected, key=lambda e: e["timestamp"], reverse=body.get("orderBy") == "timestamp desc")
+
+    def list(self, body):
+        request = _FakeGcpRequest({"entries": self._matching(body)[:1]})
+        request.body, request.cursor = body, 1
+        return request
+
+    def list_next(self, request, response):
+        matching = self._matching(request.body)
+        if request.cursor >= len(matching):
+            return None
+        nxt = _FakeGcpRequest({"entries": matching[request.cursor : request.cursor + 1]})
+        nxt.body, nxt.cursor = request.body, request.cursor + 1
+        return nxt
+
+
 class _StubGcpCollector:
     """GcpCollector wired to fakes; import deferred so the module stays optional."""
 
@@ -506,6 +620,29 @@ class TestGcpLifecycleCollection(unittest.TestCase):
         snapshot = collector.collect()
         grants = [e for e in snapshot["auditLogEntries"] if e["protoPayload"]["methodName"] == "SetIamPolicy"]
         self.assertLessEqual(len(grants), 30)
+
+    def test_creation_events_survive_grant_noise(self):
+        # A busy project's SetIamPolicy traffic exceeds the page budget; the
+        # rare CreateServiceAccount events must still be collected or every
+        # service account loses created_at/created_by.
+        collector = _StubGcpCollector()
+        collector._logging = _BusyProjectGcpLogging()
+        methods = [e["protoPayload"]["methodName"] for e in collector.collect()["auditLogEntries"]]
+        self.assertTrue(any(m.endswith("CreateServiceAccount") for m in methods))
+
+    def test_grant_page_budget_covers_both_ends_of_the_window(self):
+        # The earliest retained grants date long-lived users; the newest cover
+        # recently added ones. A budget spent only oldest-first goes blind to
+        # everything after the horizon it starves at.
+        collector = _StubGcpCollector()
+        collector._logging = _BusyProjectGcpLogging()
+        members = [
+            str(delta.get("member"))
+            for e in collector.collect()["auditLogEntries"]
+            for delta in (e["protoPayload"].get("serviceData") or {}).get("policyDelta", {}).get("bindingDeltas", [])
+        ]
+        self.assertIn("user:old@corp.com", members)
+        self.assertIn("user:recent@corp.com", members)
 
     def test_gcp_snapshot_feeds_identity_inventory_lifecycle(self):
         from cloudsplaining.identity_inventory.gcp import build_inventory
@@ -551,6 +688,7 @@ class TestAzureGraphCollection(unittest.TestCase):
         audit_path = next(p for p in collector.paths if "directoryAudits" in p)
         self.assertIn("Add user", audit_path)
         self.assertIn("Add service principal", audit_path)
+        self.assertIn("Invite external user", audit_path)
         sp_sign_in_path = next(p for p in collector.paths if "servicePrincipalSignInActivities" in p)
         self.assertIn("https://graph.microsoft.com/beta", sp_sign_in_path)
         self.assertEqual(snapshot["directoryAudits"][0]["activityDisplayName"], "Add user")
