@@ -43,7 +43,7 @@ class OciProvider(Provider):
 
     def scan(self, data: Any) -> AccountModel:
         snapshot = self._normalize(data)
-        model = AccountModel(self.name)
+        model = AccountModel(self.name, account_id=str(snapshot.get("account_id") or ""))
 
         self._add_identities(snapshot, model)
         self._add_memberships(snapshot, model)

@@ -38,6 +38,12 @@ class TestAzureEngine(unittest.TestCase):
         policy = model.policies["owner"]
         self.assertEqual(policy.kind, MANAGED)
 
+    def test_scan_reads_account_id_from_snapshot(self):
+        model = self.provider.scan({"account_id": "00000000-sub-id", "roleDefinitions": []})
+        self.assertEqual(model.account_id, "00000000-sub-id")
+        # Bare role-definition lists carry no account scope.
+        self.assertEqual(self.provider.scan([]).account_id, "")
+
     def test_not_actions_subtract_privesc(self):
         model = self.provider.scan(
             [

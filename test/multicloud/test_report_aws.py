@@ -28,6 +28,15 @@ class TestReportAws(unittest.TestCase):
             self.assertIn(key, report)
         self.assertEqual(report["links"], {})
 
+    def test_account_id_is_first_top_level_key(self):
+        model = GcpProvider().scan({"bindings": [{"role": "roles/owner", "members": ["user:a@b.com"]}]})
+        model.account_id = "demo-project"
+        report = render(model)
+        self.assertEqual(next(iter(report)), "account_id")
+        self.assertEqual(report["account_id"], "demo-project")
+        # json.dumps preserves insertion order, so account_id is line 1 of the payload.
+        self.assertIn('"account_id"', json.dumps(report, indent=2).splitlines()[1])
+
     def test_policy_entry_has_all_categories(self):
         model = OciProvider().scan(["Allow group A to manage all-resources in tenancy"])
         report = render(model)

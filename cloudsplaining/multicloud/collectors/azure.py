@@ -64,6 +64,7 @@ class AzureCollector(Collector):
 
     def collect(self) -> dict[str, Any]:
         snapshot: dict[str, Any] = {
+            "account_id": self.subscription_id,
             "roleDefinitions": self._role_definitions(),
             "roleAssignments": self._role_assignments(),
             "users": [],

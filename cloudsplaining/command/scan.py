@@ -19,7 +19,6 @@ from typing import Any, Literal, cast, overload
 import click
 import yaml
 from click import Context
-from policy_sentry.util.arns import get_account_from_arn
 
 from cloudsplaining import set_log_level
 from cloudsplaining.identity_inventory.inventory import build_identity_inventory
@@ -274,15 +273,8 @@ def scan_account_authorization_details(
     # the inventory is a full census and does not honor finding exclusions.
     results["identity_inventory"] = build_identity_inventory("aws", account_authorization_details_cfg)
 
-    # Lazy method to get an account ID
-    account_id = ""
-    for role in results.get("roles", []):
-        if "arn:aws:iam::aws:" not in results["roles"][role]["arn"]:
-            account_id = get_account_from_arn(results["roles"][role]["arn"])
-            break
-
     html_report = HTMLReport(
-        account_id=account_id,
+        account_id=results.get("account_id", ""),
         account_name=account_name,
         results=results,
         minimize=minimize,

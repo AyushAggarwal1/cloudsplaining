@@ -1,8 +1,9 @@
 """Serialize an :class:`AccountModel` into the AWS report JSON shape.
 
-The output mirrors ``iam-findings-default.json``: top-level ``users``,
-``groups``, ``roles``, ``aws_managed_policies``, ``customer_managed_policies``,
-``inline_policies``, ``exclusions``, and ``links``. Identity entries reference
+The output mirrors ``iam-findings-default.json``: top-level ``account_id`` and
+``provider`` first, then ``users``, ``groups``, ``roles``,
+``aws_managed_policies``, ``customer_managed_policies``, ``inline_policies``,
+``exclusions``, and ``links``. Identity entries reference
 their attached policies via ``{policy_id: policy_name}`` dicts; policy entries
 carry the per-category findings and an ``AttachedTo`` back-reference.
 """
@@ -51,6 +52,7 @@ def policy_collection_keys(report: dict[str, Any]) -> list[str]:
 def render(model: AccountModel, exclusions: Exclusions = DEFAULT_EXCLUSIONS) -> dict[str, Any]:
     """Return the full AWS-shaped report dict for ``model``."""
     report: dict[str, Any] = {
+        "account_id": model.account_id,
         "provider": model.provider,
         "groups": {pid: _principal_entry(p, model.provider, exclusions) for pid, p in model.groups.items()},
         "users": {pid: _principal_entry(p, model.provider, exclusions) for pid, p in model.users.items()},

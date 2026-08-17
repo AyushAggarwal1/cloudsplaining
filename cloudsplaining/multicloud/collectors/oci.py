@@ -102,6 +102,7 @@ class OciCollector(Collector):
         self._merge_idcs_created_by(user_payloads, client, tenancy)
 
         return {
+            "account_id": tenancy,
             "users": user_payloads,
             "groups": [self._named(g) for g in groups],
             "dynamicGroups": [self._dynamic_group(d) for d in dynamic_groups],

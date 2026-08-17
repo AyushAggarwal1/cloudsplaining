@@ -163,6 +163,12 @@ class TestCollectors(unittest.TestCase):
             collector._import("cloudsplaining_missing_sdk_xyz")
         self.assertIn("cloudsplaining[gcp]", str(ctx.exception))
 
+    def test_oci_snapshot_records_tenancy_as_account_id(self):
+        collector = get_collector("oci", tenancy_id="ocid.tenancy", client=_FakeIdentityClient())
+        snapshot = collector.collect()
+        self.assertEqual(snapshot["account_id"], "ocid.tenancy")
+        self.assertEqual(next(iter(snapshot)), "account_id")
+
     def test_oci_collector_with_injected_client(self):
         collector = get_collector("oci", tenancy_id="ocid.tenancy", client=_FakeIdentityClient())
         snapshot = collector.collect()
@@ -595,6 +601,11 @@ class _StubGcpCollector:
 
 
 class TestGcpLifecycleCollection(unittest.TestCase):
+    def test_gcp_snapshot_records_project_as_account_id(self):
+        snapshot = _StubGcpCollector().collect()
+        self.assertEqual(snapshot["account_id"], "demo")
+        self.assertEqual(next(iter(snapshot)), "account_id")
+
     def test_collect_includes_service_account_activities(self):
         snapshot = _StubGcpCollector().collect()
         emails = [a["activity"]["serviceAccount"]["email"] for a in snapshot["serviceAccountActivities"]]
@@ -657,6 +668,30 @@ class TestGcpLifecycleCollection(unittest.TestCase):
         self.assertEqual(jane.created_at, datetime(2026, 1, 5, tzinfo=timezone.utc))
         self.assertEqual(jane.created_by, "admin@corp.com")
         self.assertEqual(jane.last_used, datetime(2026, 7, 20, tzinfo=timezone.utc))
+
+
+class _StubManagementAzureCollector(AzureCollector):
+    """Azure collector with the network planes stubbed out; exercises collect()'s snapshot assembly."""
+
+    def __init__(self):
+        credential = type("Cred", (), {"get_token": lambda self, scope: type("T", (), {"token": "t"})()})()
+        super().__init__(subscription_id="00000000-0000-0000-0000-00000000sub1", credential=credential)
+
+    def _role_definitions(self):
+        return []
+
+    def _role_assignments(self):
+        return []
+
+    def _collect_graph(self, snapshot):
+        return None
+
+
+class TestAzureSnapshotAssembly(unittest.TestCase):
+    def test_azure_snapshot_records_subscription_as_account_id(self):
+        snapshot = _StubManagementAzureCollector().collect()
+        self.assertEqual(snapshot["account_id"], "00000000-0000-0000-0000-00000000sub1")
+        self.assertEqual(next(iter(snapshot)), "account_id")
 
 
 class TestAzureGraphCollection(unittest.TestCase):

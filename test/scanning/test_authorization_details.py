@@ -144,3 +144,32 @@ class TestAuthorizationFileDetails(unittest.TestCase):
                 "sts:AssumeRole",
             ],
         )
+
+    def test_results_account_id_is_first_key_derived_from_user_arn(self):
+        """An account with no roles still gets its account id, from the first user ARN."""
+        authz_details = AuthorizationDetails(auth_json=self.authz_json)
+        results = authz_details.results
+        self.assertEqual(next(iter(results)), "account_id")
+        self.assertEqual(results["account_id"], "111122223333")
+
+    def test_results_account_id_prefers_role_arns(self):
+        """Roles are the traditional derivation source, so they win over users."""
+        authz_json = get_authorization_details_with_example_policy(
+            policy_document_dict=self.policy_with_resource_constraints
+        )
+        authz_json["RoleDetailList"] = [
+            {
+                "Path": "/",
+                "RoleName": "MyRole",
+                "RoleId": "MyRole",
+                "Arn": "arn:aws:iam::999988887777:role/MyRole",
+                "CreateDate": "2019-12-18 19:10:08+00:00",
+                "AssumeRolePolicyDocument": None,
+                "InstanceProfileList": [],
+                "RolePolicyList": [],
+                "AttachedManagedPolicies": [],
+                "Tags": [],
+            }
+        ]
+        results = AuthorizationDetails(auth_json=authz_json).results
+        self.assertEqual(results["account_id"], "999988887777")

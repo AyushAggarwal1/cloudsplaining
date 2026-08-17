@@ -2,6 +2,12 @@
 
 Cloudsplaining supports scanning IAM configurations across AWS, Azure, GCP, and OCI.
 
+Every scan's JSON output begins with an `account_id` field identifying the account the
+data was collected from — the AWS account ID (derived from principal ARNs), the Azure
+subscription ID, the GCP project ID, or the OCI tenancy OCID (recorded in the snapshot
+by `collect-cloud`). Snapshots collected before this field existed scan with
+`"account_id": ""`.
+
 ---
 
 ### AWS

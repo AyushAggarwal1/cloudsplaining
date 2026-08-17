@@ -72,8 +72,10 @@ class Principal:
 class AccountModel:
     """Holds every principal and policy discovered for one account/provider."""
 
-    def __init__(self, provider: str) -> None:
+    def __init__(self, provider: str, account_id: str = "") -> None:
         self.provider = provider
+        #: subscription/project/tenancy the snapshot was collected from ("" if unknown)
+        self.account_id = account_id
         self.users: dict[str, Principal] = {}
         self.groups: dict[str, Principal] = {}
         self.roles: dict[str, Principal] = {}

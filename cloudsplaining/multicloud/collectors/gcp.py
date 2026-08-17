@@ -91,6 +91,7 @@ class GcpCollector(Collector):
     def collect(self) -> dict[str, Any]:
         bindings = self._bindings()
         snapshot: dict[str, Any] = {
+            "account_id": self.project_id,
             "serviceAccounts": self._service_accounts(),
             "customRoles": self._custom_roles(),
             "predefinedRoles": self._predefined_roles(bindings),

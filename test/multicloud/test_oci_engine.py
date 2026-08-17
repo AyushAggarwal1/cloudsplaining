@@ -36,6 +36,13 @@ class TestOciEngine(unittest.TestCase):
         policy = next(iter(model.policies.values()))
         self.assertTrue(_cat(policy, "PublicAccess")["findings"])
 
+    def test_scan_reads_account_id_from_snapshot(self):
+        model = self.provider.scan({"account_id": "ocid1.tenancy.oc1..demo", "policies": []})
+        self.assertEqual(model.account_id, "ocid1.tenancy.oc1..demo")
+        # Pasted statement lists carry no account scope.
+        statements_only = self.provider.scan(["Allow group Admins to manage all-resources in tenancy"])
+        self.assertEqual(statements_only.account_id, "")
+
     def test_condition_suppresses_data_exfiltration(self):
         model = self.provider.scan(["Allow group X to read buckets in tenancy where request.region = 'x'"])
         policy = next(iter(model.policies.values()))

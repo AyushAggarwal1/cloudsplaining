@@ -20,6 +20,12 @@ class TestGcpEngine(unittest.TestCase):
         self.assertEqual(policy.kind, CUSTOMER)
         self.assertTrue(_cat(policy, "PrivilegeEscalation")["findings"])
 
+    def test_scan_reads_account_id_from_snapshot(self):
+        model = self.provider.scan({"account_id": "demo-project", "bindings": []})
+        self.assertEqual(model.account_id, "demo-project")
+        # Bare role/binding lists carry no account scope.
+        self.assertEqual(self.provider.scan([]).account_id, "")
+
     def test_predefined_role_goes_to_managed(self):
         model = self.provider.scan(
             {

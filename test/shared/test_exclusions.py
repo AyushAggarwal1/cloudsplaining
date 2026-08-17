@@ -111,6 +111,7 @@ class AuthorizationsFileComponentsExclusionsTestCase(unittest.TestCase):
         results = authorization_details.results
 
         expected_results = {
+            "account_id": "",
             "groups": {},
             "users": {},
             "roles": {},
