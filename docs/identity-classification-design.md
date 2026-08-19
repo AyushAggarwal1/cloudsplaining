@@ -88,13 +88,14 @@ Users, through the resolver:
   ⇒ machine).
 - Report row present but zero credentials (no password, no keys, no MFA) → `unknown`,
   reason `"no credentials provisioned"`. (Behavior change: today silently human.)
-- Nothing anywhere → `unknown` with a stable, matchable reason: `"created after credential report was
-  generated"` when a report exists, `"no credential evidence: credential report unavailable"` when it
-  does not (the record's `created_at` and the snapshot's `credentialReportGeneratedTime` carry the
-  timestamps; reason strings stay constant for platform matching).
+- Nothing anywhere → `unknown` with a stable, matchable reason. The builder compares
+  `created_at` with `credentialReportGeneratedTime`: a later user gets `"created after credential
+  report was generated"`; a pre-existing user gets `"credential report row missing for pre-existing
+  user"`. Missing comparison timestamps are stated explicitly. No report yields
+  `"no credential evidence: credential report unavailable"`.
 
-Roles (semantics unchanged, reasons added): service-role path → machine; SAML/Identity Center trust →
-human; otherwise machine (`"workload role"`). Access-key child records → machine (`"access key"`).
+Roles: service-role path → machine; IAM Identity Center reserved path/name or SAML trust → human;
+otherwise machine (`"workload role"`). Access-key child records → machine (`"access key"`).
 
 Outcome for the driver case: `ciem` → machine once the supplement runs or its CreateAccessKey event
 lands; honestly `unknown` (never falsely human) in the seconds-old worst case.
@@ -112,6 +113,10 @@ Service principals: machine (`"service principal"`). Users:
 3. Sign-in data unavailable tenant-wide (no `AuditLog.Read.All` / no Entra P1): soft default **human**
    with reason `"Entra user (sign-in data unavailable)"` — an Entra user object is a people-directory
    entry by construction, unlike an AWS IAM user; the reason keeps the soft default honest.
+
+If Graph identity collection is unavailable, subscription RBAC assignments still produce honest
+fallback rows: users are `unknown` and service principals are `machine`; the principal ID is used
+as both `id` and `name`, and lifecycle fields stay null.
 
 ## GCP
 

@@ -9,8 +9,9 @@ optionally:
 - ``auditLogEntries``: Admin Activity log entries — fills service-account
   ``created_at`` / ``created_by`` from ``CreateServiceAccount`` calls, human
   users' ``last_used`` from their latest logged activity, and human users'
-  ``created_at`` / ``created_by`` from the ``SetIamPolicy`` grant that first
-  added them (the in-GCP proxy that replaces the Workspace Admin SDK scope).
+  ``created_at`` from their earliest observed activity or retained
+  ``SetIamPolicy`` ADD. The granter is used as ``created_by`` only when that
+  grant is also the earliest evidence.
 - ``serviceAccountActivities``: Policy Analyzer
   ``serviceAccountLastAuthentication`` activities — fills service-account
   ``last_used``.
@@ -44,7 +45,7 @@ def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
     audit_entries = data.get("auditLogEntries") or []
     sa_audit = _sa_audit(audit_entries)
     activities = _sa_activities(data.get("serviceAccountActivities") or [])
-    user_activity = _user_activity(audit_entries)
+    user_activity = _user_activity_bounds(audit_entries)
     user_grants = _user_grants(audit_entries)
 
     records: list[IdentityRecord] = []
@@ -71,11 +72,20 @@ def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
 # --------------------------------------------------------------- service accounts
 def _sa_record(
     sa: dict[str, Any],
-    sa_audit: dict[str, tuple[Any, str | None]],
+    sa_audit: dict[str, tuple[datetime | None, str | None]],
     activities: dict[str, Any],
 ) -> IdentityRecord:
     email = get_field(sa, "email") or ""
     audit_time, audit_actor = sa_audit.get(email, (None, None))
+    source_created_at = parse_timestamp(get_field(sa, "createTime"))
+    created_at = source_created_at or audit_time
+    created_by = audit_actor
+    if (
+        source_created_at is not None
+        and audit_time is not None
+        and abs((source_created_at - audit_time).total_seconds()) > 10 * 60
+    ):
+        created_by = None
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="service_account",
@@ -83,15 +93,15 @@ def _sa_record(
         name=email,
         classification=MACHINE,
         classification_reason="service account",
-        created_at=parse_timestamp(get_field(sa, "createTime")) or parse_timestamp(audit_time),
+        created_at=created_at,
         last_used=parse_timestamp(activities.get(email)),
-        created_by=audit_actor,
+        created_by=created_by,
     )
 
 
-def _sa_audit(entries: list[dict[str, Any]]) -> dict[str, tuple[Any, str | None]]:
+def _sa_audit(entries: list[dict[str, Any]]) -> dict[str, tuple[datetime | None, str | None]]:
     """Map service-account email -> (creation timestamp, creator principal)."""
-    audit: dict[str, tuple[Any, str | None]] = {}
+    audit: dict[str, tuple[datetime | None, str | None]] = {}
     for entry in entries:
         payload = get_field(entry, "protoPayload") or {}
         method = get_field(payload, "methodName") or ""
@@ -101,7 +111,10 @@ def _sa_audit(entries: list[dict[str, Any]]) -> dict[str, tuple[Any, str | None]
         if not email:
             continue
         actor = get_field(get_field(payload, "authenticationInfo") or {}, "principalEmail")
-        audit[email] = (get_field(entry, "timestamp") or get_field(entry, "receiveTimestamp"), actor)
+        stamp = parse_timestamp(get_field(entry, "timestamp") or get_field(entry, "receiveTimestamp"))
+        current = audit.get(email)
+        if current is None or (stamp is not None and (current[0] is None or stamp > current[0])):
+            audit[email] = (stamp, actor)
     return audit
 
 
@@ -115,14 +128,16 @@ def _sa_activities(activities: list[dict[str, Any]]) -> dict[str, Any]:
             full_name = get_field(activity, "fullResourceName") or ""
             email = full_name.rsplit("/", 1)[-1] if "@" in full_name else ""
         if email:
-            last_auth[email] = get_field(detail, "lastAuthenticatedTime")
+            newest = max_timestamp(last_auth.get(email), get_field(detail, "lastAuthenticatedTime"))
+            if newest is not None:
+                last_auth[email] = newest
     return last_auth
 
 
 # ------------------------------------------------------------------------- users
 def _user_record(
     user: dict[str, Any],
-    user_activity: dict[str, datetime],
+    user_activity: dict[str, tuple[datetime, datetime]],
     user_grants: dict[str, tuple[datetime, str | None]],
 ) -> IdentityRecord:
     email = get_field(user, "primaryEmail") or ""
@@ -130,6 +145,7 @@ def _user_record(
     if last_login == _EPOCH:
         last_login = None
     grant_time, grant_actor = user_grants.get(email, (None, None))
+    _, last_activity = user_activity.get(email, (None, None))
     classification, reason = machine_name_signal(email) or (HUMAN, "Workspace directory user")
     return IdentityRecord(
         provider=PROVIDER,
@@ -141,17 +157,24 @@ def _user_record(
         # The Workspace directory creationTime is authoritative; the first
         # SetIamPolicy grant is only a proxy for when the user entered GCP.
         created_at=parse_timestamp(get_field(user, "creationTime")) or grant_time,
-        last_used=max_timestamp(last_login, user_activity.get(email)),
+        last_used=max_timestamp(last_login, last_activity),
         created_by=grant_actor,
     )
 
 
 def _member_user_record(
     email: str,
-    user_activity: dict[str, datetime],
+    user_activity: dict[str, tuple[datetime, datetime]],
     user_grants: dict[str, tuple[datetime, str | None]],
 ) -> IdentityRecord:
     grant_time, grant_actor = user_grants.get(email, (None, None))
+    first_activity, last_activity = user_activity.get(email, (None, None))
+    created_at = min((stamp for stamp in (grant_time, first_activity) if stamp is not None), default=None)
+    # If activity proves the identity existed before the retained ADD grant, that
+    # later granter is not an accurate creator and must not be attributed as one.
+    created_by = (
+        grant_actor if grant_time is not None and (first_activity is None or grant_time <= first_activity) else None
+    )
     classification, reason = machine_name_signal(email) or (HUMAN, "user: IAM binding member")
     return IdentityRecord(
         provider=PROVIDER,
@@ -160,24 +183,27 @@ def _member_user_record(
         name=email,
         classification=classification,
         classification_reason=reason,
-        created_at=grant_time,
-        last_used=user_activity.get(email),
-        created_by=grant_actor,
+        created_at=created_at,
+        last_used=last_activity,
+        created_by=created_by,
     )
 
 
-def _user_activity(entries: list[dict[str, Any]]) -> dict[str, datetime]:
-    """Map principal email -> latest audit-log activity timestamp."""
-    latest: dict[str, datetime] = {}
+def _user_activity_bounds(entries: list[dict[str, Any]]) -> dict[str, tuple[datetime, datetime]]:
+    """Map principal email -> (earliest, latest) observed audit activity."""
+    bounds: dict[str, tuple[datetime, datetime]] = {}
     for entry in entries:
         payload = get_field(entry, "protoPayload") or {}
         email = get_field(get_field(payload, "authenticationInfo") or {}, "principalEmail")
         stamp = parse_timestamp(get_field(entry, "timestamp") or get_field(entry, "receiveTimestamp"))
         if not email or stamp is None:
             continue
-        if email not in latest or stamp > latest[email]:
-            latest[email] = stamp
-    return latest
+        if email not in bounds:
+            bounds[email] = (stamp, stamp)
+        else:
+            earliest, latest = bounds[email]
+            bounds[email] = (min(earliest, stamp), max(latest, stamp))
+    return bounds
 
 
 def _user_grants(entries: list[dict[str, Any]]) -> dict[str, tuple[datetime, str | None]]:

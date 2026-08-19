@@ -254,6 +254,7 @@ class TestClassificationReasons(unittest.TestCase):
             _REPORT_HEADER
             + "someoneelse,arn:aws:iam::111122223333:user/someoneelse,true,false,false,N/A,false,N/A,N/A,N/A,N/A\n"
         )
+        data["credentialReportGeneratedTime"] = "2026-07-01T00:00:00Z"
         neutral = self._records(data)["alice"]
         self.assertEqual(neutral.classification, UNKNOWN)
         self.assertEqual(neutral.classification_reason, "created after credential report was generated")
@@ -320,6 +321,7 @@ class TestGapUserEvidence(unittest.TestCase):
             _REPORT_HEADER
             + "someoneelse,arn:aws:iam::111122223333:user/someoneelse,true,false,false,N/A,false,N/A,N/A,N/A,N/A\n"
         )
+        data["credentialReportGeneratedTime"] = "2026-07-01T00:00:00Z"
         return data
 
     def test_gap_user_with_access_key_event_is_machine(self):

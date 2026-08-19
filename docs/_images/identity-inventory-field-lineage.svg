@@ -43,12 +43,12 @@
   <rect x="430" y="100" width="350" height="220" class="box azure"/>
   <text x="455" y="132" class="box-title">Azure source services</text>
   <text x="455" y="163" class="body">
-    <tspan x="455" dy="0">Microsoft Graph /users</tspan>
-    <tspan x="455" dy="23">Microsoft Graph /servicePrincipals</tspan>
-    <tspan x="455" dy="29">Graph directoryAudits</tspan>
-    <tspan x="455" dy="23">• creator attribution</tspan>
-    <tspan x="455" dy="29">Graph sign-in activity + beta report</tspan>
-    <tspan x="455" dy="23">• user and SP last use</tspan>
+    <tspan x="455" dy="0">Graph /users + /servicePrincipals</tspan>
+    <tspan x="455" dy="23">• profiles, creation, sign-in evidence</tspan>
+    <tspan x="455" dy="29">Graph directoryAudits + beta reports</tspan>
+    <tspan x="455" dy="23">• creator and last-use evidence</tspan>
+    <tspan x="455" dy="29">ARM role assignments</tspan>
+    <tspan x="455" dy="23">• fallback IDs when Graph misses</tspan>
   </text>
 
   <rect x="820" y="100" width="350" height="220" class="box gcp"/>
@@ -87,7 +87,7 @@
   <rect x="430" y="380" width="350" height="120" class="box azure"/>
   <text x="605" y="414" text-anchor="middle" class="box-title">azure.build_inventory</text>
   <text x="605" y="442" text-anchor="middle" class="mono">user · service_principal</text>
-  <text x="605" y="470" text-anchor="middle" class="small">Groups are membership containers, not rows.</text>
+  <text x="605" y="470" text-anchor="middle" class="small">Graph profiles + assignment-only fallbacks.</text>
 
   <rect x="820" y="380" width="350" height="120" class="box gcp"/>
   <text x="995" y="414" text-anchor="middle" class="box-title">gcp.build_inventory</text>

@@ -22,6 +22,7 @@ import csv
 import io
 import json
 import urllib.parse
+from operator import itemgetter
 from typing import TYPE_CHECKING, Any
 
 from cloudsplaining.identity_inventory.classify import machine_name_signal, resolve
@@ -48,10 +49,21 @@ def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
     credential_events = _credential_event_flags(events)
     report = _credential_report_index(data.get("credentialReport"))
     report_available = bool(data.get("credentialReport"))
+    report_generated_at = parse_timestamp(data.get("credentialReportGeneratedTime"))
     supplement = data.get("credentialSupplement") or {}
     records: list[IdentityRecord] = []
     for user in data.get("UserDetailList") or []:
-        records.append(_user_record(user, report, report_available, supplement, credential_events, creators))
+        records.append(
+            _user_record(
+                user,
+                report,
+                report_available,
+                report_generated_at,
+                supplement,
+                credential_events,
+                creators,
+            )
+        )
         records.extend(_access_key_records(user, report))
     records += [_role_record(role, creators) for role in data.get("RoleDetailList") or []]
     return records
@@ -62,15 +74,23 @@ def _user_record(
     user: dict[str, Any],
     report: dict[str, dict[str, Any]],
     report_available: bool,
+    report_generated_at: datetime | None,
     supplement: dict[str, dict[str, Any]],
     credential_events: dict[str, dict[str, bool]],
-    creators: dict[tuple[str, str], str],
+    creators: dict[tuple[str, str], list[tuple[datetime | None, str]]],
 ) -> IdentityRecord:
     name = user.get("UserName") or ""
     arn = user.get("Arn") or ""
     report_row = report.get(name) or report.get(arn)
+    created_at = parse_timestamp(user.get("CreateDate"))
     classification, reason = _user_classification(
-        name, report_row, report_available, supplement.get(name), credential_events.get(name)
+        name,
+        created_at,
+        report_row,
+        report_available,
+        report_generated_at,
+        supplement.get(name),
+        credential_events.get(name),
     )
     return IdentityRecord(
         provider=PROVIDER,
@@ -79,26 +99,24 @@ def _user_record(
         name=name,
         classification=classification,
         classification_reason=reason,
-        created_at=parse_timestamp(user.get("CreateDate")),
+        created_at=created_at,
         last_used=_user_last_used(user, report_row),
-        created_by=creators.get(("user", name)),
+        created_by=_creator_for(creators, ("user", name), created_at),
     )
 
 
 def _user_classification(
     name: str,
+    created_at: datetime | None,
     report_row: dict[str, Any] | None,
     report_available: bool,
+    report_generated_at: datetime | None,
     supplement_row: dict[str, Any] | None,
     event_flags: dict[str, bool] | None,
 ) -> tuple[str, str]:
     """Machine-name → live supplement → credential report → CloudTrail credential
     events → honest unknown; the first present evidence wins."""
-    fallback = (
-        "created after credential report was generated"
-        if report_available
-        else "no credential evidence: credential report unavailable"
-    )
+    fallback = _missing_credential_evidence_reason(report_available, created_at, report_generated_at)
     return resolve(
         machine_name_signal(name),
         _shape_signal(_supplement_shape(supplement_row), "live IAM lookup"),
@@ -106,6 +124,23 @@ def _user_classification(
         _events_signal(event_flags),
         fallback=fallback,
     )
+
+
+def _missing_credential_evidence_reason(
+    report_available: bool,
+    created_at: datetime | None,
+    report_generated_at: datetime | None,
+) -> str:
+    """Describe a missing report row without asserting an unverified cache race."""
+    if not report_available:
+        return "no credential evidence: credential report unavailable"
+    if report_generated_at is None:
+        return "credential report row missing; generation time unavailable"
+    if created_at is None:
+        return "credential report row missing; user creation time unavailable"
+    if created_at > report_generated_at:
+        return "created after credential report was generated"
+    return "credential report row missing for pre-existing user"
 
 
 def _supplement_shape(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -228,14 +263,20 @@ def _events_signal(flags: dict[str, bool] | None) -> tuple[str, str] | None:
 
 
 # ------------------------------------------------------------------------ roles
-def _role_record(role: dict[str, Any], creators: dict[tuple[str, str], str]) -> IdentityRecord:
+def _role_record(
+    role: dict[str, Any],
+    creators: dict[tuple[str, str], list[tuple[datetime | None, str]]],
+) -> IdentityRecord:
     name = role.get("RoleName") or ""
     if _is_service_role(role):
         classification, reason = MACHINE, "AWS service role"
+    elif _is_identity_center_role(role):
+        classification, reason = HUMAN, "IAM Identity Center role"
     elif _is_sso_role(role):
         classification, reason = HUMAN, "SAML-federated role"
     else:
         classification, reason = MACHINE, "workload role"
+    created_at = parse_timestamp(role.get("CreateDate"))
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="role",
@@ -243,15 +284,27 @@ def _role_record(role: dict[str, Any], creators: dict[tuple[str, str], str]) -> 
         name=name,
         classification=classification,
         classification_reason=reason,
-        created_at=parse_timestamp(role.get("CreateDate")),
+        created_at=created_at,
         last_used=parse_timestamp((role.get("RoleLastUsed") or {}).get("LastUsedDate")),
-        created_by=creators.get(("role", name)),
+        created_by=_creator_for(creators, ("role", name), created_at),
     )
 
 
 def _is_service_role(role: dict[str, Any]) -> bool:
     path = role.get("Path") or ""
     return "/aws-service-role/" in path or "/aws-service-role/" in (role.get("Arn") or "")
+
+
+def _is_identity_center_role(role: dict[str, Any]) -> bool:
+    """AWS IAM Identity Center permission-set roles are used by people."""
+    path = role.get("Path") or ""
+    arn = role.get("Arn") or ""
+    name = role.get("RoleName") or ""
+    return (
+        "/aws-reserved/sso.amazonaws.com/" in path
+        or "/aws-reserved/sso.amazonaws.com/" in arn
+        or name.startswith("AWSReservedSSO_")
+    )
 
 
 def _is_sso_role(role: dict[str, Any]) -> bool:
@@ -287,9 +340,12 @@ def _trust_statements(role: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # ------------------------------------------------------------------- created_by
-def _creators(events: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
-    """Map ("user"|"role", name) -> creator principal from CreateUser/CreateRole events."""
-    creators: dict[tuple[str, str], str] = {}
+_CREATION_EVENT_TOLERANCE_SECONDS = 10 * 60
+
+
+def _creators(events: list[dict[str, Any]]) -> dict[tuple[str, str], list[tuple[datetime | None, str]]]:
+    """Map an identity key to timestamped creator candidates from CloudTrail."""
+    creators: dict[tuple[str, str], list[tuple[datetime | None, str]]] = {}
     for item in events:
         event = _event_payload(item)
         if event is None:
@@ -298,18 +354,37 @@ def _creators(events: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
         creator = identity.get("arn") or identity.get("userName") or identity.get("principalId")
         if not creator:
             continue
+        event_time = parse_timestamp(event.get("eventTime") or event.get("EventTime") or item.get("EventTime"))
         parameters = event.get("requestParameters") or {}
         event_name = event.get("eventName") or event.get("EventName")
         if event_name == "CreateUser" and parameters.get("userName"):
-            creators["user", parameters["userName"]] = creator
+            creators.setdefault(("user", parameters["userName"]), []).append((event_time, creator))
         elif event_name == "CreateRole" and parameters.get("roleName"):
-            creators["role", parameters["roleName"]] = creator
+            creators.setdefault(("role", parameters["roleName"]), []).append((event_time, creator))
         elif event_name == "CreateServiceLinkedRole":
             # The request only names the service; the created role is in the response.
             role = (event.get("responseElements") or {}).get("role") or {}
             if role.get("roleName"):
-                creators["role", role["roleName"]] = creator
+                creators.setdefault(("role", role["roleName"]), []).append((event_time, creator))
     return creators
+
+
+def _creator_for(
+    creators: dict[tuple[str, str], list[tuple[datetime | None, str]]],
+    key: tuple[str, str],
+    created_at: datetime | None,
+) -> str | None:
+    """Choose the creation event for the current incarnation, not a namesake."""
+    candidates = creators.get(key) or []
+    timed = [(stamp, actor) for stamp, actor in candidates if stamp is not None]
+    if created_at is not None and timed:
+        stamp, actor = min(timed, key=lambda item: abs((item[0] - created_at).total_seconds()))
+        if abs((stamp - created_at).total_seconds()) <= _CREATION_EVENT_TOLERANCE_SECONDS:
+            return actor
+        return None
+    if timed:
+        return max(timed, key=itemgetter(0))[1]
+    return candidates[0][1] if candidates else None
 
 
 def _event_payload(item: dict[str, Any]) -> dict[str, Any] | None:

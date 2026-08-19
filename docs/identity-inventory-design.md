@@ -149,17 +149,17 @@ Every record carries `classification_reason` — a stable string the platform ma
 
 | classification | reasons |
 |---|---|
-| machine | `automation-style name (token: <token>)` · `workload email domain (gserviceaccount.com)` · `active access keys, no console password (credential report)` / `(live IAM lookup)` · `access key created, no console password (CloudTrail events)` · `access key` · `AWS service role` · `workload role` · `service principal` · `directory synchronization account` · `non-interactive sign-ins only` · `service account` · `workload identity` · `API-key-only capabilities` |
-| human | `console password or MFA (credential report)` / `(live IAM lookup)` · `console login profile created (CloudTrail events)` · `SAML-federated role` · `interactive sign-ins` · `Entra user (sign-in data unavailable)` (soft default) · `Workspace directory user` · `user: IAM binding member` · `MFA enrolled` · `console login recorded` · `console-capable (default)` (soft default) |
-| unknown | `no credential evidence: credential report unavailable` · `created after credential report was generated` · `no credentials provisioned (credential report)` / `(live IAM lookup)` · `never signed in` · `no capability or activity evidence` |
+| machine | `automation-style name (token: <token>)` · `workload email domain (gserviceaccount.com)` · `active access keys, no console password (credential report)` / `(live IAM lookup)` · `access key created, no console password (CloudTrail events)` · `access key` · `AWS service role` · `workload role` · `service principal` · `service principal (role assignment only)` · `directory synchronization account` · `non-interactive sign-ins only` · `service account` · `workload identity` · `API-key-only capabilities` |
+| human | `console password or MFA (credential report)` / `(live IAM lookup)` · `console login profile created (CloudTrail events)` · `IAM Identity Center role` · `SAML-federated role` · `interactive sign-ins` · `Entra user (sign-in data unavailable)` (soft default) · `Workspace directory user` · `user: IAM binding member` · `MFA enrolled` · `console login recorded` · `console-capable (default)` (soft default) |
+| unknown | `no credential evidence: credential report unavailable` · `created after credential report was generated` · `credential report row missing for pre-existing user` · `credential report row missing; generation time unavailable` · `credential report row missing; user creation time unavailable` · `no credentials provisioned (credential report)` / `(live IAM lookup)` · `role-assignment user; Graph profile unavailable` · `never signed in` · `no capability or activity evidence` |
 
 ## Per-cloud field sources
 
 | Field | aws | azure | gcp | oci |
 |---|---|---|---|---|
-| `created_at` | `CreateDate` (authorization details) | `createdDateTime` | SAs: `createTime` if exported, else audit-log `CreateServiceAccount` entry; users: Workspace `creationTime` if supplied, else first `SetIamPolicy` audit entry that ADDed the `user:` member | `time-created` / `meta.created` |
+| `created_at` | `CreateDate` (authorization details) | `createdDateTime`; null for assignment-only fallback rows | SAs: `createTime` if exported, else newest matching audit-log `CreateServiceAccount` entry; users: Workspace `creationTime` if supplied, else earliest observed activity or retained `SetIamPolicy` ADD | `time-created` / `meta.created` |
 | `last_used` | roles: `RoleLastUsed.LastUsedDate`; users: max of credential-report `password_last_used`, `access_key_*_last_used_date` | users: max of `signInActivity.{lastSignInDateTime,lastNonInteractiveSignInDateTime}`; SPs: `servicePrincipalSignInActivities` (by `appId`) | SAs: Policy Analyzer `serviceAccountLastAuthentication` (`lastAuthenticatedTime`); users: newest of audit-log activity (`authenticationInfo.principalEmail`) and Workspace `lastLoginTime` if supplied | `lastSuccessfulLoginTime` / identity-domains `userState.lastSuccessfulLoginDate` |
-| `created_by` | optional `cloudTrailEvents` (`CreateUser`/`CreateRole`/`CreateServiceLinkedRole`, raw LookupEvents or simplified) | optional `directoryAudits` (`Add user` / `Add service principal` / `Invite external user`, `initiatedBy`) | SAs: `CreateServiceAccount` caller; users: `SetIamPolicy` granter (audit logs) | `idcsCreatedBy` (identity domains) or optional `auditEvents` |
+| `created_by` | timestamp-correlated `cloudTrailEvents` (`CreateUser`/`CreateRole`/`CreateServiceLinkedRole`) | timestamp-correlated `directoryAudits`; null for assignment-only rows | SAs: matching `CreateServiceAccount` caller; binding-only users: retained granter only when no earlier activity disproves it | `idcsCreatedBy` or creation-time-correlated `auditEvents` |
 | `age_days` | derived: `(reference_time - created_at).days` | ← | ← | ← |
 | `days_since_last_used` | derived: `(reference_time - last_used).days`; `None` when never used/unknown | ← | ← | ← |
 
@@ -167,6 +167,8 @@ Optional enrichment inputs ride along as extra top-level keys of the same input 
 (`credentialReport`, `cloudTrailEvents`, `servicePrincipalSignInActivities`, `directoryAudits`,
 `auditLogEntries`, `serviceAccountActivities`, `auditEvents`) so one file per cloud is enough. The
 docstring of each builder documents the CLI commands that produce each piece.
+
+All timestamps are normalized to UTC before serialization and day arithmetic.
 
 ## Error handling
 

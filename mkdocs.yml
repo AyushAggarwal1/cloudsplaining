@@ -58,6 +58,7 @@ nav:
       - JavaScript: "contributing/javascript.md"
       - Python: "contributing/python.md"
       - JSON Schema: "contributing/results-json-schema.md"
+      - Identity Inventory Field Lineage: "contributing/identity-inventory-field-lineage.md"
       - Release Drafter: "contributing/release-drafter.md"
       - Report Generation: "contributing/report.md"
       - Testing: "contributing/testing.md"

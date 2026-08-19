@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from cloudsplaining.identity_inventory.parsing import days_since, utc_now
+from cloudsplaining.identity_inventory.parsing import days_since, parse_timestamp, utc_now
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -40,7 +40,9 @@ class IdentityRecord:
 
     def to_dict(self, reference_time: datetime | None = None) -> dict[str, Any]:
         """Serialize with derived fields computed against ``reference_time`` (default: now, UTC)."""
-        reference = reference_time or utc_now()
+        reference = parse_timestamp(reference_time) or utc_now()
+        created_at = parse_timestamp(self.created_at)
+        last_used = parse_timestamp(self.last_used)
         return {
             "provider": self.provider,
             "identity_type": self.identity_type,
@@ -48,9 +50,9 @@ class IdentityRecord:
             "name": self.name,
             "classification": self.classification,
             "classification_reason": self.classification_reason,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "age_days": days_since(self.created_at, reference),
-            "days_since_last_used": days_since(self.last_used, reference),
+            "created_at": created_at.isoformat() if created_at else None,
+            "age_days": days_since(created_at, reference),
+            "days_since_last_used": days_since(last_used, reference),
             "created_by": self.created_by,
-            "last_used": self.last_used.isoformat() if self.last_used else None,
+            "last_used": last_used.isoformat() if last_used else None,
         }

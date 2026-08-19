@@ -19,11 +19,15 @@ API keys but no console password are service accounts by convention → machine.
 # or https://opensource.org/licenses/BSD-3-Clause
 from __future__ import annotations
 
-from typing import Any
+from operator import itemgetter
+from typing import TYPE_CHECKING, Any
 
 from cloudsplaining.identity_inventory.classify import machine_name_signal, resolve
 from cloudsplaining.identity_inventory.model import HUMAN, MACHINE, IdentityRecord
 from cloudsplaining.identity_inventory.parsing import as_bool, get_field, parse_timestamp
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 PROVIDER = "oci"
 
@@ -42,13 +46,17 @@ def build_inventory(data: dict[str, Any]) -> list[IdentityRecord]:
     return records
 
 
-def _user_record(user: dict[str, Any], creators: dict[str, str]) -> IdentityRecord:
+def _user_record(
+    user: dict[str, Any],
+    creators: dict[str, list[tuple[datetime | None, str]]],
+) -> IdentityRecord:
     name = get_field(user, "name") or get_field(user, "userName") or ""
     meta = user.get("meta") or {}
     state = user.get(USER_STATE_EXTENSION) or {}
     last_login = get_field(user, "lastSuccessfulLoginTime", "lastSuccessfulLoginDate") or get_field(
         state, "lastSuccessfulLoginDate"
     )
+    created_at = parse_timestamp(get_field(user, "timeCreated") or get_field(meta, "created"))
     classification, reason = _user_classification(user, name, last_login)
     return IdentityRecord(
         provider=PROVIDER,
@@ -57,9 +65,9 @@ def _user_record(user: dict[str, Any], creators: dict[str, str]) -> IdentityReco
         name=name,
         classification=classification,
         classification_reason=reason,
-        created_at=parse_timestamp(get_field(user, "timeCreated") or get_field(meta, "created")),
+        created_at=created_at,
         last_used=parse_timestamp(last_login),
-        created_by=_idcs_creator(user) or creators.get(name),
+        created_by=_idcs_creator(user) or _audit_creator_for(creators, name, created_at),
     )
 
 
@@ -71,15 +79,15 @@ def _user_classification(user: dict[str, Any], name: str, last_login: object) ->
     what it is *now* is a machine. MFA ranks higher because enrollment is current state.
     """
     capabilities = _capabilities(user)
-    console = get_field(capabilities, "canUseConsolePassword")
-    api_keys = get_field(capabilities, "canUseApiKeys")
+    console = _explicit_bool(get_field(capabilities, "canUseConsolePassword"))
+    api_keys = _explicit_bool(get_field(capabilities, "canUseApiKeys"))
     # MFA enrollment is a human act — it exists only for console logins.
     mfa = (HUMAN, "MFA enrolled") if as_bool(get_field(user, "isMfaActivated")) else None
-    api_key_only = (MACHINE, "API-key-only capabilities") if console is False and as_bool(api_keys) else None
+    api_key_only = (MACHINE, "API-key-only capabilities") if console is False and api_keys is True else None
     login = (HUMAN, "console login recorded") if parse_timestamp(last_login) is not None else None
     # Console capability is the creation default, so this is weak evidence;
     # the reason string flags it.
-    console_capable = (HUMAN, "console-capable (default)") if as_bool(console) else None
+    console_capable = (HUMAN, "console-capable (default)") if console is True else None
     return resolve(
         machine_name_signal(name),
         mfa,
@@ -95,6 +103,19 @@ def _capabilities(user: dict[str, Any]) -> dict[str, Any]:
     return {**(user.get(USER_CAPABILITIES_EXTENSION) or {}), **(user.get("capabilities") or {})}
 
 
+def _explicit_bool(value: object) -> bool | None:
+    """Parse explicit cloud booleans without treating a missing value as false."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+    return None
+
+
 def _idcs_creator(user: dict[str, Any]) -> str | None:
     created_by = get_field(user, "idcsCreatedBy")
     if not isinstance(created_by, dict):
@@ -102,8 +123,12 @@ def _idcs_creator(user: dict[str, Any]) -> str | None:
     return get_field(created_by, "display") or get_field(created_by, "value")
 
 
-def _dynamic_group_record(group: dict[str, Any], creators: dict[str, str]) -> IdentityRecord:
+def _dynamic_group_record(
+    group: dict[str, Any],
+    creators: dict[str, list[tuple[datetime | None, str]]],
+) -> IdentityRecord:
     name = get_field(group, "name") or ""
+    created_at = parse_timestamp(get_field(group, "timeCreated"))
     return IdentityRecord(
         provider=PROVIDER,
         identity_type="dynamic_group",
@@ -111,19 +136,14 @@ def _dynamic_group_record(group: dict[str, Any], creators: dict[str, str]) -> Id
         name=name,
         classification=MACHINE,
         classification_reason="workload identity",
-        created_at=parse_timestamp(get_field(group, "timeCreated")),
-        created_by=creators.get(name),
+        created_at=created_at,
+        created_by=_audit_creator_for(creators, name, created_at),
     )
 
 
-def _audit_creators(events: list[dict[str, Any]]) -> dict[str, str]:
-    """Map created resource name -> creator principal from identity-creation audit events.
-
-    First event wins per name: the collector orders events most-relevant-first
-    (newest creation window first), and a name can recur when a deleted
-    identity's namesake was created earlier in the retention window.
-    """
-    creators: dict[str, str] = {}
+def _audit_creators(events: list[dict[str, Any]]) -> dict[str, list[tuple[datetime | None, str]]]:
+    """Map created resource names to timestamped creator candidates."""
+    creators: dict[str, list[tuple[datetime | None, str]]] = {}
     for event in events:
         kind = str(get_field(event, "eventType") or get_field(event, "eventName") or "").lower()
         if not kind.endswith(CREATION_EVENT_SUFFIXES):
@@ -133,5 +153,24 @@ def _audit_creators(events: list[dict[str, Any]]) -> dict[str, str]:
         target = get_field(payload, "resourceName") or get_field(event, "resourceName")
         actor = get_field(identity, "principalName") or get_field(event, "principalName")
         if target and actor:
-            creators.setdefault(target, actor)
+            stamp = parse_timestamp(get_field(event, "eventTime") or get_field(payload, "eventTime"))
+            creators.setdefault(target, []).append((stamp, actor))
     return creators
+
+
+def _audit_creator_for(
+    creators: dict[str, list[tuple[datetime | None, str]]],
+    name: str,
+    created_at: datetime | None,
+) -> str | None:
+    """Select the audit event closest to this identity's actual creation time."""
+    candidates = creators.get(name) or []
+    timed = [(stamp, actor) for stamp, actor in candidates if stamp is not None]
+    if created_at is not None and timed:
+        stamp, actor = min(timed, key=lambda item: abs((item[0] - created_at).total_seconds()))
+        if abs((stamp - created_at).total_seconds()) <= 10 * 60:
+            return actor
+        return None
+    if timed:
+        return max(timed, key=itemgetter(0))[1]
+    return candidates[0][1] if candidates else None

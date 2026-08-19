@@ -32,11 +32,11 @@ Every row has exactly these 11 keys, in this order:
 ```
 
 The shared dispatch is in
-[`identity_inventory/inventory.py`](../../cloudsplaining/identity_inventory/inventory.py),
+[`identity_inventory/inventory.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/identity_inventory/inventory.py),
 the common row model is in
-[`identity_inventory/model.py`](../../cloudsplaining/identity_inventory/model.py),
+[`identity_inventory/model.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/identity_inventory/model.py),
 and tolerant timestamp/key parsing is in
-[`identity_inventory/parsing.py`](../../cloudsplaining/identity_inventory/parsing.py).
+[`identity_inventory/parsing.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/identity_inventory/parsing.py).
 
 ## What each common field means
 
@@ -55,7 +55,8 @@ and tolerant timestamp/key parsing is in
 | `last_used` | Most relevant provider activity/login timestamp, sometimes the maximum of several candidates. | Semantics differ by provider and identity type; the exact candidates are documented below. A never-used identity and an unavailable activity API can both yield `null`. |
 
 Timestamp parsing accepts SDK `datetime` objects, dates, and ISO-8601 strings. A
-trailing `Z` is normalized to UTC; naive timestamps are assumed UTC. Empty strings,
+trailing `Z` and explicit offsets are normalized to UTC; naive timestamps are
+assumed UTC. Empty strings,
 `null`, `none`, `n/a`, `no_information`, `not_supported`, and invalid timestamps
 become `null`.
 
@@ -76,8 +77,9 @@ evidence:
   history is limited to roughly 90 days.
 
 The collector calls are in
-[`command/download.py`](../../cloudsplaining/command/download.py); row construction
-is in [`identity_inventory/aws.py`](../../cloudsplaining/identity_inventory/aws.py).
+[`command/download.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/command/download.py);
+row construction is in
+[`identity_inventory/aws.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/identity_inventory/aws.py).
 
 | Output field | IAM user | IAM role | Access-key child row | Source/service and transformation |
 | --- | --- | --- | --- | --- |
@@ -85,12 +87,12 @@ is in [`identity_inventory/aws.py`](../../cloudsplaining/identity_inventory/aws.
 | `identity_type` | `user` | `role` | `access_key` | Selected by `UserDetailList`, `RoleDetailList`, or an occupied credential-report key slot. |
 | `id` | `Arn`, else `UserId`, else `UserName` | `Arn`, else `RoleId`, else `RoleName` | `(<owner Arn or name>)/access-key-<1|2>` | Core values come from IAM authorization details. Key IDs are synthesized because the credential report only labels slot 1/2. |
 | `name` | `UserName` | `RoleName` | `<UserName>/access-key-<1|2>` | IAM authorization details plus a synthetic suffix for key rows. |
-| `classification` | Evidence decision below | Service role → machine; SAML role → human; all other roles → machine | Always `machine` | User classification uses name, live IAM credential state, credential report, then CloudTrail. Role classification uses path/ARN and trust policy. |
-| `classification_reason` | Winning user evidence string | `AWS service role`, `SAML-federated role`, or `workload role` | `access key` | Generated locally with the classification. |
+| `classification` | Evidence decision below | Service role → machine; Identity Center or SAML role → human; all other roles → machine | Always `machine` | User classification uses name, live IAM credential state, credential report, then CloudTrail. Role classification uses path/name/ARN and trust policy. |
+| `classification_reason` | Winning user evidence string | `AWS service role`, `IAM Identity Center role`, `SAML-federated role`, or `workload role` | `access key` | Generated locally with the classification. |
 | `created_at` | `CreateDate` | `CreateDate` | Credential report `access_key_<slot>_last_rotated` | IAM authorization details for users/roles; IAM credential report for keys. A slot exists if it has a rotation timestamp or is active. |
 | `age_days` | Derived from `created_at` | Derived | Derived | Shared serializer; whole days, UTC, clamped at zero. |
 | `days_since_last_used` | Derived from `last_used` | Derived | Derived | Shared serializer. |
-| `created_by` | Creator from matching CloudTrail `CreateUser` | Creator from `CreateRole`, or response role name from `CreateServiceLinkedRole` | Owning user's ARN, else user name | CloudTrail creator preference is `userIdentity.arn`, then `userName`, then `principalId`. Key ownership is structural and does not depend on event retention. |
+| `created_by` | Creator from a CloudTrail `CreateUser` within ten minutes of `CreateDate` | Timestamp-correlated `CreateRole`, or response role name from `CreateServiceLinkedRole` | Owning user's ARN, else user name | Correlation prevents a deleted namesake's event from being assigned to the current identity. Creator preference is `userIdentity.arn`, then `userName`, then `principalId`. |
 | `last_used` | Latest of IAM `PasswordLastUsed` and credential-report `password_last_used`, `access_key_1_last_used_date`, `access_key_2_last_used_date` | `RoleLastUsed.LastUsedDate` | Credential report `access_key_<slot>_last_used_date` | IAM authorization details and the IAM credential report. |
 
 ### AWS user classification order
@@ -108,22 +110,23 @@ The first available signal wins:
    `mfa_active`, and `access_key_<1|2>_active`.
 4. A recent `CreateLoginProfile` CloudTrail event means `human`; a recent
    `CreateAccessKey` event means `machine`.
-5. With no evidence, the result is `unknown`. The reason is
-   `created after credential report was generated` when a report exists, otherwise
-   `no credential evidence: credential report unavailable`.
+5. With no evidence, the result is `unknown`. If there is no report, the reason is
+   `no credential evidence: credential report unavailable`. For a missing row in
+   a present report, `CreateDate` is compared with `credentialReportGeneratedTime`:
+   later users get `created after credential report was generated`; earlier users
+   get `credential report row missing for pre-existing user`. Missing comparison
+   timestamps are stated explicitly instead of asserting a cache race.
 
-The fifth label is inferred from a user being absent from an available cached
-report. Although `credentialReportGeneratedTime` is stored in the snapshot, the
-builder does not compare it with `CreateDate`.
-
-Role order is structural: `/aws-service-role/` in the path/ARN wins first; then a
-trust statement using `sts:AssumeRoleWithSAML` or a SAML provider makes the role
-human; every other role is considered a workload role.
+Role order is structural: `/aws-service-role/` in the path/ARN wins first; then
+`/aws-reserved/sso.amazonaws.com/` or an `AWSReservedSSO_` name identifies an
+IAM Identity Center human role; then a SAML trust identifies a human role. Every
+other role is considered a workload role.
 
 ## Azure lineage
 
-The Azure management-plane role APIs do not feed inventory rows. Inventory identity
-and lifecycle data comes from Microsoft Graph:
+Microsoft Graph is the authoritative identity/lifecycle source. Azure
+management-plane role assignments additionally supply honest fallback rows for
+users and service principals that Graph did not return:
 
 - Graph v1.0 `/users` selects `id`, `userPrincipalName`, `displayName`,
   `createdDateTime`, and, when permitted/licensed, `signInActivity`.
@@ -137,21 +140,22 @@ and lifecycle data comes from Microsoft Graph:
 The collector retries `/users` without `signInActivity` if the tenant lacks
 `AuditLog.Read.All` and the required Entra licensing. Audit and report endpoints
 also fail open to empty lists. See
-[`multicloud/collectors/azure.py`](../../cloudsplaining/multicloud/collectors/azure.py)
-and [`identity_inventory/azure.py`](../../cloudsplaining/identity_inventory/azure.py).
+[`multicloud/collectors/azure.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/multicloud/collectors/azure.py)
+and
+[`identity_inventory/azure.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/identity_inventory/azure.py).
 
 | Output field | Entra user | Service principal | Source/service and transformation |
 | --- | --- | --- | --- |
 | `provider` | `azure` | `azure` | Builder constant. |
-| `identity_type` | `user` | `service_principal` | Chosen from the Graph `users` or `servicePrincipals` collection. |
-| `id` | Graph `id`, else resolved name | Graph `id`, else resolved name | Microsoft Graph object ID is preferred. |
-| `name` | `userPrincipalName`, else `displayName` | `displayName`, else `appId` | Microsoft Graph. |
-| `classification` | Evidence decision below | Always `machine` | Service principals, including applications and managed identities, are workloads. |
-| `classification_reason` | Winning user evidence string | `service principal` | Generated locally. |
-| `created_at` | `createdDateTime` | `createdDateTime` | Microsoft Graph object property. |
+| `identity_type` | `user` | `service_principal` | Chosen from Graph or RBAC `principalType` when Graph is unavailable. |
+| `id` | Graph `id`, else resolved name | Graph `id`, else resolved name | RBAC-only rows use `principalId`, which is the real object ID. |
+| `name` | `userPrincipalName`, else `displayName` | `displayName`, else `appId` | RBAC-only rows use `principalId` as an explicit fallback because no display profile exists. |
+| `classification` | Evidence decision below; RBAC-only user → `unknown` | Always `machine` | RBAC-only rows do not guess a user type from an opaque GUID. |
+| `classification_reason` | Winning evidence or `role-assignment user; Graph profile unavailable` | `service principal` or `service principal (role assignment only)` | Generated locally. |
+| `created_at` | `createdDateTime` | `createdDateTime` | Microsoft Graph object property; null for RBAC-only rows. |
 | `age_days` | Derived from `created_at` | Derived | Shared serializer. |
 | `days_since_last_used` | Derived from `last_used` | Derived | Shared serializer. |
-| `created_by` | Initiator of a matching creation/invitation directory audit | Initiator of a matching creation audit | Audit initiator is the user's `userPrincipalName`, else the app's `displayName`. Target matching tries object `id`, UPN, and display name. Retention is commonly 30 days for P1/P2 and 7 days for free tenants. |
+| `created_by` | Initiator of a matching creation/invitation directory audit | Initiator of a matching creation audit | The audit closest to `createdDateTime` wins; ID matches are authoritative and name fallbacks must be within 24 hours. RBAC-only rows remain null. |
 | `last_used` | Latest of `signInActivity.lastSignInDateTime`, `lastNonInteractiveSignInDateTime`, and `lastSuccessfulSignInDateTime` | Latest of object `signInActivity.lastSignInDateTime` and beta report `lastSignInActivity.lastSignInDateTime` (or row `lastSignInDateTime`) matched by `appId` | Microsoft Graph sign-in activity/report data. The live collector normally obtains SP use from the beta report because its SP `$select` does not include `signInActivity`. |
 
 ### Azure user classification order
@@ -169,9 +173,9 @@ The first available signal wins:
    explicit soft default `human` with reason
    `Entra user (sign-in data unavailable)`.
 
-Groups are intentionally omitted. Also, principals synthesized by the Azure policy
-engine from role assignments can appear in the report's `roles` section without an
-inventory row when Graph did not return the corresponding service principal.
+Groups are intentionally omitted. Missing Graph users/service principals are
+deduplicated from `roleAssignments`, so the inventory retains the principal ID
+without fabricating profile or lifecycle facts.
 
 ## GCP lineage
 
@@ -193,8 +197,10 @@ Identity Admin SDK `users.list` with `primaryEmail`, `id`, `creationTime`, and
 `lastLoginTime`. The current live GCP collector does not fetch that collection, so
 it must be present in an offline/pre-enriched snapshot to be used.
 
-See [`multicloud/collectors/gcp.py`](../../cloudsplaining/multicloud/collectors/gcp.py)
-and [`identity_inventory/gcp.py`](../../cloudsplaining/identity_inventory/gcp.py).
+See
+[`multicloud/collectors/gcp.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/multicloud/collectors/gcp.py)
+and
+[`identity_inventory/gcp.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/identity_inventory/gcp.py).
 
 | Output field | Service account | Workspace/directory user | Binding-only `user:` member | Source/service and transformation |
 | --- | --- | --- | --- | --- |
@@ -204,15 +210,17 @@ and [`identity_inventory/gcp.py`](../../cloudsplaining/identity_inventory/gcp.py
 | `name` | Service-account email | `primaryEmail` | Text after the `user:` prefix | IAM, directory, or IAM policy binding. |
 | `classification` | Always `machine` | Name heuristic, else `human` | Name heuristic, else `human` | A binding member with a `gserviceaccount.com` domain is also recognized as a workload through the service-account branch/domain rule. |
 | `classification_reason` | `service account` | Automation/workload-domain reason, else `Workspace directory user` | Automation/workload-domain reason, else `user: IAM binding member` | Generated locally. |
-| `created_at` | Service-account `createTime`, else timestamp of a matching `CreateServiceAccount` audit event | Directory `creationTime`, else earliest retained `SetIamPolicy` ADD grant | Earliest retained `SetIamPolicy` ADD grant | IAM/directory is authoritative when present; audit logs are fallbacks/proxies. The current live collector stores only email/ID/display name from service-account list, so its `created_at` usually depends on audit logs. |
+| `created_at` | Service-account `createTime`, else newest matching `CreateServiceAccount` event | Directory `creationTime`, else earliest retained grant | Earlier of the retained ADD grant and first observed activity | The activity floor prevents a later grant from making `created_at` newer than an already-observed `last_used`. |
 | `age_days` | Derived from `created_at` | Derived | Derived | Shared serializer. |
 | `days_since_last_used` | Derived from `last_used` | Derived | Derived | Shared serializer. |
-| `created_by` | `protoPayload.authenticationInfo.principalEmail` from matching `CreateServiceAccount` | Actor on earliest retained `SetIamPolicy` ADD grant | Same grant actor | Cloud Logging Admin Activity. The directory user's actual creator is not supplied by this builder. |
+| `created_by` | Caller from the newest matching `CreateServiceAccount`; rejected when it conflicts with an authoritative `createTime` | Actor on earliest retained `SetIamPolicy` ADD grant | Grant actor only when the grant is not later than first observed activity | A later retained grant is not mislabeled as creator when earlier activity proves prior existence. |
 | `last_used` | Policy Analyzer `activity.lastAuthenticatedTime`, keyed by service-account email | Latest of Workspace `lastLoginTime` and newest Admin Activity entry whose `authenticationInfo.principalEmail` is the user | Newest matching Admin Activity timestamp | Workspace's Unix-epoch “never logged in” sentinel becomes `null`. User `last_used` means latest observed activity in this GCP project, not necessarily a console login. |
 
 For grant attribution, only `SetIamPolicy` entries whose
 `serviceData.policyDelta.bindingDeltas` contain `action = ADD` and a `user:` member
-are considered. The earliest retained matching grant wins. The collector bounds
+are considered. The builder also tracks the earliest and latest observed activity
+per user. The earlier of first activity and first retained grant becomes the
+binding-only creation proxy; a later grant cannot supply `created_by`. The collector bounds
 logging work: three newest general-activity pages, five service-account-creation
 pages, and 15 oldest plus 15 newest grant pages (up to 1,000 entries per page).
 Consequently, `null` can also mean the relevant event fell outside a page budget or
@@ -232,8 +240,10 @@ The live collector combines:
 
 The builder also accepts full Identity Domains SCIM user objects in offline input,
 including `meta.created`, the user-state extension, and the capabilities extension.
-See [`multicloud/collectors/oci.py`](../../cloudsplaining/multicloud/collectors/oci.py)
-and [`identity_inventory/oci.py`](../../cloudsplaining/identity_inventory/oci.py).
+See
+[`multicloud/collectors/oci.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/multicloud/collectors/oci.py)
+and
+[`identity_inventory/oci.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/identity_inventory/oci.py).
 
 | Output field | OCI user | Dynamic group | Source/service and transformation |
 | --- | --- | --- | --- |
@@ -246,7 +256,7 @@ and [`identity_inventory/oci.py`](../../cloudsplaining/identity_inventory/oci.py
 | `created_at` | Classic `timeCreated`, else SCIM `meta.created` | `timeCreated` | OCI Identity / Identity Domains. |
 | `age_days` | Derived from `created_at` | Derived | Shared serializer. |
 | `days_since_last_used` | Derived from `last_used` | Always `null` because `last_used` is absent | Shared serializer. |
-| `created_by` | SCIM `idcsCreatedBy.display`, else `.value`, else matching audit actor | Matching audit actor | Identity Domains takes precedence because it does not expire with Audit retention. Audit maps event `data.resourceName` to `data.identity.principalName`. |
+| `created_by` | SCIM `idcsCreatedBy.display`, else `.value`, else creation-time-correlated audit actor | Creation-time-correlated audit actor | Identity Domains takes precedence. Among same-name Audit events, the event within ten minutes of `timeCreated` wins; mismatched namesake events are rejected. |
 | `last_used` | First available classic `lastSuccessfulLoginTime` / `lastSuccessfulLoginDate`, else the Identity Domains user-state extension `lastSuccessfulLoginDate` | `null` | OCI Identity / Identity Domains. |
 
 ### OCI user classification order
@@ -255,7 +265,8 @@ The first available signal wins:
 
 1. An automation-style name means `machine`.
 2. `isMfaActivated = true` means `human`.
-3. `canUseConsolePassword = false` with `canUseApiKeys = true` means `machine`.
+3. Explicit boolean or string `canUseConsolePassword = false` with
+   `canUseApiKeys = true` means `machine`; missing values are not treated as false.
 4. A parseable last-login timestamp means `human`.
 5. `canUseConsolePassword = true` means the explicit soft default `human` with
    reason `console-capable (default)`.
@@ -270,7 +281,9 @@ the scan.
 ## Validation against `op/*.json`
 
 The audit below reads metadata only; it does not reproduce identity values. All six
-files contain exactly the same 11 keys listed in the output contract.
+files contain exactly the same 11 keys listed in the output contract. These are
+existing scan artifacts; the accuracy changes documented above affect newly built
+reports without changing the schema.
 
 | File | Rows | Identity types | Classification | `created_at: null` | `last_used: null` | `created_by: null` |
 | --- | ---: | --- | --- | ---: | ---: | ---: |
@@ -292,7 +305,9 @@ These counts are consistent with the source logic:
   service principals are machines.
 - GCP has many binding/IAM-list identities but only partial audit/directory
   enrichment, producing 132 missing creation/creator values. This is expected from
-  the optional and page/retention-bounded lifecycle sources.
+  the optional and page/retention-bounded lifecycle sources. The audit also found
+  one row whose old grant-derived `created_at` was later than `last_used`; the
+  first-observed-activity floor now prevents that inconsistency in new scans.
 - OCI creation fields come from the core Identity call. Dynamic groups inherently
   have no `last_used`; user nulls mean no login timestamp was returned. OCI-2's one
   missing creator is compatible with Identity Domains/Audit enrichment being absent
@@ -301,9 +316,9 @@ These counts are consistent with the source logic:
 ## Report insertion points
 
 - AWS appends the census after policy analysis in
-  [`command/scan.py`](../../cloudsplaining/command/scan.py).
+  [`command/scan.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/command/scan.py).
 - Azure, GCP, and OCI append it after provider report rendering in
-  [`command/scan_cloud.py`](../../cloudsplaining/command/scan_cloud.py).
+  [`command/scan_cloud.py`](https://github.com/salesforce/cloudsplaining/blob/master/cloudsplaining/command/scan_cloud.py).
 - A bare OCI statement-list input has no identity snapshot, so `scan-cloud` cannot
   build `identity_inventory` for that input form.
 

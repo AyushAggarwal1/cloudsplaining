@@ -24,7 +24,7 @@ A read-only role with the AWS-managed `SecurityAudit` policy covers all of the a
 | Permission | What it powers | If missing |
 |---|---|---|
 | **Reader** role on the subscription (ARM) | **Core** — role definitions + assignments | collect fails |
-| Graph `Directory.Read.All` | users, groups, service principals, `created_at`, classification | identity list empty (logged warning; role-based report still produced) |
+| Graph `Directory.Read.All` | users, groups, service principals, `created_at`, classification | RBAC-assignment-only user/SP rows remain with principal ID as the name, honest fallback classification, and null lifecycle fields |
 | Graph `AuditLog.Read.All` **+ Entra ID P1/P2 license** | user `signInActivity` → `last_used` **and** sign-in-shape classification (interactive → human, non-interactive-only → machine, never → `unknown`) | collector auto-retries without `signInActivity`; user `last_used` null; users soft-default to human with reason `Entra user (sign-in data unavailable)` |
 | Graph `AuditLog.Read.All` | `directoryAudits` ("Add user" / "Add service principal" / "Invite external user") → `created_by` (30-day retention on P1/P2 tenants, **7 days on free tenants**) | `created_by` null |
 | Graph `Reports.Read.All` | `servicePrincipalSignInActivities` (Graph beta) → service-principal `last_used` | SP `last_used` null |
@@ -36,7 +36,7 @@ Enable - policyanalyzer.googleapis.com
 |---|---|---|
 | `iam.serviceAccounts.list` + `resourcemanager.projects.getIamPolicy` (e.g. `roles/viewer`) | **Core** — service accounts, binding members, structural classification (the IAM API exposes no service-account creation time; `created_at` comes from audit logs below) | no identities |
 | `policyanalyzer.serviceAccountLastAuthenticationActivities.query` (`roles/policyanalyzer.activityAnalysisViewer`) | SA `last_used` (Policy Analyzer `lastAuthenticatedTime`) | null |
-| `logging.logEntries.list` (`roles/logging.viewer`) — Admin Activity audit entries, always on, free, ~400-day retention | SA `created_by`/`created_at` (`CreateServiceAccount`); human users' `last_used` (their newest logged activity) and proxy `created_at`/`created_by` (the `SetIamPolicy` grant that first added the user, plus who granted it) | null |
+| `logging.logEntries.list` (`roles/logging.viewer`) — Admin Activity audit entries, always on, free, ~400-day retention | SA `created_by`/`created_at` (`CreateServiceAccount`); human users' `last_used`; proxy `created_at` from the earliest observed activity or retained ADD grant; grant actor only when the grant is earliest | null |
 
 Human users' lifecycle comes entirely from the audit logs above — the Workspace Admin SDK scope
 (`admin.directory.user.readonly`) is **deliberately not required**: it needs a Workspace Super Admin
@@ -44,8 +44,8 @@ to set up domain-wide delegation and only adds the Google-account creation date 
 time. If a Workspace `users.list` export is supplied anyway, the builder uses its `creationTime`
 as authoritative and takes the newest of `lastLoginTime` and audit activity for `last_used`.
 Semantics of the audit-log substitute: `last_used` means "last activity *in GCP*" (read-only calls
-only appear if Data Access logs are enabled) and `created_at` means "when the user was first
-granted GCP access", both bounded by the 400-day retention window.
+only appear if Data Access logs are enabled) and `created_at` means "earliest observed existence in
+this project's retained logs". Both are bounded by retention and collector page budgets.
 
 ## OCI
 

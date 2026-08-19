@@ -31,7 +31,8 @@ def parse_timestamp(value: object) -> datetime | None:
     Naive datetimes are assumed UTC; sentinel strings and garbage return ``None``.
     """
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        parsed = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     if isinstance(value, date):
         return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
     if not isinstance(value, str) or value.strip().lower() in _NULL_SENTINELS:
@@ -44,7 +45,9 @@ def parse_timestamp(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def max_timestamp(*values: object) -> datetime | None:
@@ -55,9 +58,11 @@ def max_timestamp(*values: object) -> datetime | None:
 
 def days_since(value: datetime | None, reference_time: datetime) -> int | None:
     """Whole days from ``value`` to ``reference_time`` (clamped at 0), or ``None``."""
-    if value is None:
+    normalized_value = parse_timestamp(value)
+    normalized_reference = parse_timestamp(reference_time)
+    if normalized_value is None or normalized_reference is None:
         return None
-    return max((reference_time - value).days, 0)
+    return max((normalized_reference - normalized_value).days, 0)
 
 
 def as_bool(value: object) -> bool:

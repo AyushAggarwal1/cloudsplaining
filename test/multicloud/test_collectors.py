@@ -84,12 +84,16 @@ class _FakeIdentityClient:
 def _audit_event(event_type, resource_name, principal_name):
     identity = type("I", (), {"principal_name": principal_name})()
     data = type("D", (), {"resource_name": resource_name, "identity": identity})()
+    event_time = {
+        "alice": _OCI_USER_CREATED,
+        "instances-dg": _OCI_DG_CREATED,
+    }.get(resource_name, _OCI_NOW)
     return type(
         "E",
         (),
         {
             "event_type": event_type,
-            "event_time": datetime(2026, 7, 23, tzinfo=timezone.utc),
+            "event_time": event_time,
             "data": data,
         },
     )()
@@ -281,7 +285,7 @@ class TestOciAuditCollection(unittest.TestCase):
         self.assertIn(
             {
                 "eventType": "com.oraclecloud.identityControlPlane.CreateUser",
-                "eventTime": datetime(2026, 7, 23, tzinfo=timezone.utc),
+                "eventTime": _OCI_USER_CREATED,
                 "data": {"resourceName": "alice", "identity": {"principalName": "admin@corp.com"}},
             },
             snapshot["auditEvents"],
