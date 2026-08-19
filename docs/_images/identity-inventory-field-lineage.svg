@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1160" viewBox="0 0 1600 1160" role="img" aria-labelledby="title desc">
+  <title id="title">Cloudsplaining identity inventory field lineage</title>
+  <desc id="desc">AWS, Azure, GCP, and OCI identity and lifecycle APIs feed provider builders. The builders normalize direct identifiers, classification evidence, and lifecycle facts into IdentityRecord. Serialization derives age fields and appends the eleven-field identity inventory to the JSON report.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <style>
+      .title { font: 700 30px system-ui, sans-serif; fill: #0f172a; }
+      .subtitle { font: 16px system-ui, sans-serif; fill: #475569; }
+      .box-title { font: 700 19px system-ui, sans-serif; fill: #0f172a; }
+      .body { font: 15px system-ui, sans-serif; fill: #1e293b; }
+      .small { font: 13px system-ui, sans-serif; fill: #475569; }
+      .mono { font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #0f172a; }
+      .arrow { stroke: #475569; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .aws { fill: #fff7ed; stroke: #f97316; }
+      .azure { fill: #eff6ff; stroke: #3b82f6; }
+      .gcp { fill: #f0fdf4; stroke: #22c55e; }
+      .oci { fill: #fef2f2; stroke: #ef4444; }
+      .normalize { fill: #f8fafc; stroke: #64748b; }
+      .derive { fill: #faf5ff; stroke: #a855f7; }
+      .output { fill: #ecfeff; stroke: #0891b2; }
+      .box { stroke-width: 2; rx: 14; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1160" fill="#ffffff"/>
+  <text x="800" y="42" text-anchor="middle" class="title">identity_inventory: service-to-JSON field lineage</text>
+  <text x="800" y="70" text-anchor="middle" class="subtitle">Raw provider snapshot → provider-specific evidence resolution → shared 11-field row → report append</text>
+
+  <!-- Provider source systems -->
+  <rect x="40" y="100" width="350" height="220" class="box aws"/>
+  <text x="65" y="132" class="box-title">AWS source services</text>
+  <text x="65" y="163" class="body">
+    <tspan x="65" dy="0">IAM GetAccountAuthorizationDetails</tspan>
+    <tspan x="65" dy="23">• UserDetailList / RoleDetailList</tspan>
+    <tspan x="65" dy="29">IAM credential report + live IAM lookups</tspan>
+    <tspan x="65" dy="23">• credential shape, key slots, last use</tspan>
+    <tspan x="65" dy="29">CloudTrail LookupEvents</tspan>
+    <tspan x="65" dy="23">• creators and credential events</tspan>
+  </text>
+
+  <rect x="430" y="100" width="350" height="220" class="box azure"/>
+  <text x="455" y="132" class="box-title">Azure source services</text>
+  <text x="455" y="163" class="body">
+    <tspan x="455" dy="0">Microsoft Graph /users</tspan>
+    <tspan x="455" dy="23">Microsoft Graph /servicePrincipals</tspan>
+    <tspan x="455" dy="29">Graph directoryAudits</tspan>
+    <tspan x="455" dy="23">• creator attribution</tspan>
+    <tspan x="455" dy="29">Graph sign-in activity + beta report</tspan>
+    <tspan x="455" dy="23">• user and SP last use</tspan>
+  </text>
+
+  <rect x="820" y="100" width="350" height="220" class="box gcp"/>
+  <text x="845" y="132" class="box-title">GCP source services</text>
+  <text x="845" y="163" class="body">
+    <tspan x="845" dy="0">IAM serviceAccounts.list</tspan>
+    <tspan x="845" dy="23">Resource Manager getIamPolicy</tspan>
+    <tspan x="845" dy="29">Workspace users.list (optional input)</tspan>
+    <tspan x="845" dy="29">Policy Analyzer last authentication</tspan>
+    <tspan x="845" dy="23">Cloud Logging Admin Activity</tspan>
+    <tspan x="845" dy="23">• creation, grant, and activity facts</tspan>
+  </text>
+
+  <rect x="1210" y="100" width="350" height="220" class="box oci"/>
+  <text x="1235" y="132" class="box-title">OCI source services</text>
+  <text x="1235" y="163" class="body">
+    <tspan x="1235" dy="0">Identity ListUsers</tspan>
+    <tspan x="1235" dy="23">Identity ListDynamicGroups</tspan>
+    <tspan x="1235" dy="29">Identity Domains SCIM users</tspan>
+    <tspan x="1235" dy="23">• durable idcsCreatedBy</tspan>
+    <tspan x="1235" dy="29">Audit ListEvents</tspan>
+    <tspan x="1235" dy="23">• user/dynamic-group creators</tspan>
+  </text>
+
+  <!-- Per-provider builders -->
+  <path d="M 215 320 L 215 375" class="arrow"/>
+  <path d="M 605 320 L 605 375" class="arrow"/>
+  <path d="M 995 320 L 995 375" class="arrow"/>
+  <path d="M 1385 320 L 1385 375" class="arrow"/>
+
+  <rect x="40" y="380" width="350" height="120" class="box aws"/>
+  <text x="215" y="414" text-anchor="middle" class="box-title">aws.build_inventory</text>
+  <text x="215" y="442" text-anchor="middle" class="mono">user · role · access_key</text>
+  <text x="215" y="470" text-anchor="middle" class="small">Access-key IDs/names are synthesized by slot.</text>
+
+  <rect x="430" y="380" width="350" height="120" class="box azure"/>
+  <text x="605" y="414" text-anchor="middle" class="box-title">azure.build_inventory</text>
+  <text x="605" y="442" text-anchor="middle" class="mono">user · service_principal</text>
+  <text x="605" y="470" text-anchor="middle" class="small">Groups are membership containers, not rows.</text>
+
+  <rect x="820" y="380" width="350" height="120" class="box gcp"/>
+  <text x="995" y="414" text-anchor="middle" class="box-title">gcp.build_inventory</text>
+  <text x="995" y="442" text-anchor="middle" class="mono">user · service_account</text>
+  <text x="995" y="470" text-anchor="middle" class="small">Binding-only principals become census rows.</text>
+
+  <rect x="1210" y="380" width="350" height="120" class="box oci"/>
+  <text x="1385" y="414" text-anchor="middle" class="box-title">oci.build_inventory</text>
+  <text x="1385" y="442" text-anchor="middle" class="mono">user · dynamic_group</text>
+  <text x="1385" y="470" text-anchor="middle" class="small">Dynamic groups are workload identities.</text>
+
+  <!-- Shared normalization -->
+  <path d="M 215 500 C 215 555, 500 535, 520 590" class="arrow"/>
+  <path d="M 605 500 C 605 545, 670 545, 680 590" class="arrow"/>
+  <path d="M 995 500 C 995 545, 930 545, 920 590" class="arrow"/>
+  <path d="M 1385 500 C 1385 555, 1100 535, 1080 590" class="arrow"/>
+
+  <rect x="310" y="595" width="980" height="185" class="box normalize"/>
+  <text x="800" y="630" text-anchor="middle" class="box-title">IdentityRecord normalization</text>
+  <text x="350" y="670" class="body">Selected / synthesized identity</text>
+  <text x="350" y="699" class="mono">provider · identity_type · id · name</text>
+  <text x="350" y="738" class="body">Evidence resolver</text>
+  <text x="350" y="767" class="mono">classification · classification_reason</text>
+  <text x="865" y="670" class="body">Parsed / aggregated lifecycle facts</text>
+  <text x="865" y="699" class="mono">created_at · last_used · created_by</text>
+  <text x="865" y="738" class="small">Missing optional service data remains null.</text>
+  <text x="865" y="761" class="small">Exclusions do not remove inventory rows.</text>
+
+  <!-- Serialization and output -->
+  <path d="M 800 780 L 800 835" class="arrow"/>
+  <rect x="390" y="840" width="820" height="135" class="box derive"/>
+  <text x="800" y="875" text-anchor="middle" class="box-title">IdentityRecord.to_dict(reference_time)</text>
+  <text x="800" y="908" text-anchor="middle" class="mono">created_at / last_used → ISO-8601 strings</text>
+  <text x="800" y="939" text-anchor="middle" class="mono">age_days = days(reference_time − created_at)</text>
+  <text x="800" y="963" text-anchor="middle" class="mono">days_since_last_used = days(reference_time − last_used)</text>
+
+  <path d="M 800 975 L 800 1020" class="arrow"/>
+  <rect x="270" y="1025" width="1060" height="100" class="box output"/>
+  <text x="800" y="1060" text-anchor="middle" class="box-title">Final report["identity_inventory"]</text>
+  <text x="800" y="1093" text-anchor="middle" class="mono">provider · identity_type · id · name · classification · classification_reason</text>
+  <text x="800" y="1117" text-anchor="middle" class="mono">created_at · age_days · days_since_last_used · created_by · last_used</text>
+</svg>
