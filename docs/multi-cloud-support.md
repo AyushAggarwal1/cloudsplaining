@@ -169,3 +169,33 @@ cloudsplaining scan-cloud -p oci \
 ```
 
 ---
+
+### Report JSON schema
+
+`scan-cloud -o json` emits provider-native keys — each cloud's IAM concepts keep
+their own names instead of being force-fit into the AWS report shape. The AWS
+`scan` command's report is unchanged.
+
+Common to all providers: `account_id`, `provider`, `users`, `groups`,
+`exclusions`, `links`, and `identity_inventory`. Individual principals live in
+`users` and collections of principals in `groups`, discriminated by
+`provider_kind`; there are no separate workload-identity collections.
+
+| Provider | Permission sets | Entry type field | `users` contains | `groups` contains |
+|----------|-----------------|------------------|------------------|-------------------|
+| Azure | `roles` (role definitions) | `roleType`: `BuiltInRole` \| `CustomRole` | Entra users (`user`), service principals & managed identities (`service_principal`) | Entra groups |
+| GCP | `roles` | `roleType`: `basic` \| `predefined` \| `custom` | humans (`user`), service accounts (`service_account`, deleted ones flagged `deleted: true`) | `group:` / `domain:` members |
+| OCI | `policies` | `policyType`: `tenancy` \| `compartment` | users | groups (`group`), dynamic groups (`dynamic_group`) |
+
+Permission-set entries carry `RoleName`/`RoleId` (Azure/GCP) or
+`PolicyName`/`PolicyId` (OCI), the per-category finding blocks, and an
+`AttachedTo` back-reference with `users` and `groups` lists. GCP entries always
+include an `AttachedTo.public` list holding `allUsers` /
+`allAuthenticatedUsers` binding members (no principal entries are synthesized
+for them). OCI entries include the raw `statements` and the parsed
+`GrantedAccess`. Principal entries reference their permission sets through a
+single `roles` / `policies` `{id: name}` dict.
+
+Full design rationale: `docs/2026-08-19-multicloud-provider-native-schema-design.md`.
+
+---

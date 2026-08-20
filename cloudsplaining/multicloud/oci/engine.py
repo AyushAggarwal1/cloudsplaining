@@ -5,7 +5,7 @@ Snapshot schema (all keys optional; parsed JSON)::
     {
       "users":            [ {"id": ..., "name": ...} ],
       "groups":           [ {"id": ..., "name": ...} ],
-      "dynamicGroups":    [ {"id": ..., "name": ...} ],   # workload identities -> roles
+      "dynamicGroups":    [ {"id": ..., "name": ...} ],   # workload identities -> groups
       "policies":         [ {"name": ..., "statements": [...], "compartmentId": ...} ],
       "groupMemberships": { "<groupName>": ["<userName>", ...] }
     }
@@ -13,6 +13,11 @@ Snapshot schema (all keys optional; parsed JSON)::
 Backward compatibility: a bare list of statement strings, a list of policy
 objects, or ``{"statements": [...]}`` / ``{"policies": [...]}`` all work, with
 empty identity collections.
+
+OCI has no roles concept: its permission sets are policies, serialized under
+the report's ``policies`` collection with a ``policyType`` of ``tenancy`` or
+``compartment``. Dynamic groups are groups with ``provider_kind:
+"dynamic_group"`` — policy statements address them exactly like groups.
 """
 
 # Copyright (c) 2020, salesforce.com, inc.
@@ -24,11 +29,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from cloudsplaining.multicloud.analysis import Categories, analyze_oci_statements
+from cloudsplaining.multicloud.analysis import analyze_oci_statements
 from cloudsplaining.multicloud.model import (
-    CUSTOMER,
     GROUP,
-    ROLE,
     USER,
     AccountModel,
     Policy,
@@ -36,6 +39,13 @@ from cloudsplaining.multicloud.model import (
 )
 from cloudsplaining.multicloud.oci.parser import ParsedStatement, parse_statement
 from cloudsplaining.multicloud.provider import Provider
+
+
+def _policy_type(compartment_id: object) -> str:
+    """``tenancy`` for tenancy-attached policies, else ``compartment``."""
+    if isinstance(compartment_id, str) and compartment_id.startswith("ocid1.tenancy"):
+        return "tenancy"
+    return "compartment"
 
 
 class OciProvider(Provider):
@@ -77,7 +87,12 @@ class OciProvider(Provider):
         for dgroup in snapshot.get("dynamicGroups", []) or []:
             did, name = self._id_name(dgroup)
             model.add_principal(
-                Principal(id=did, name=name, kind=ROLE, metadata={"matchingRule": _get(dgroup, "matching-rule")})
+                Principal(
+                    id=did,
+                    name=name,
+                    kind=GROUP,
+                    metadata={"provider_kind": "dynamic_group", "matchingRule": _get(dgroup, "matching-rule")},
+                )
             )
 
     def _add_memberships(self, snapshot: dict[str, Any], model: AccountModel) -> None:
@@ -106,9 +121,9 @@ class OciProvider(Provider):
             policy = Policy(
                 id=str(policy_id),
                 name=str(name),
-                kind=CUSTOMER,
                 categories=categories.result(),
                 metadata={
+                    "policyType": _policy_type(policy_obj.get("compartmentId")),
                     "compartmentId": policy_obj.get("compartmentId"),
                     "statements": statements,
                     "GrantedAccess": granted,
@@ -132,10 +147,12 @@ class OciProvider(Provider):
             name = stmt.subject.strip()
             if not name:
                 continue
-            kind = ROLE if stmt.subject_type == "dynamic-group" else GROUP
-            principal = self._find_by_name(model, kind, name)
+            principal = self._find_by_name(model, GROUP, name)
             if principal is None:
-                principal = model.add_principal(Principal(id=f"{stmt.subject_type}:{name}", name=name, kind=kind))
+                metadata = {"provider_kind": "dynamic_group"} if stmt.subject_type == "dynamic-group" else {}
+                principal = model.add_principal(
+                    Principal(id=f"{stmt.subject_type}:{name}", name=name, kind=GROUP, metadata=metadata)
+                )
             model.attach(principal, policy)
 
     # ----------------------------------------------------------------- helpers
@@ -155,7 +172,7 @@ class OciProvider(Provider):
 
     @staticmethod
     def _find_by_name(model: AccountModel, kind: str, name: str) -> Principal | None:
-        bucket = {USER: model.users, GROUP: model.groups, ROLE: model.roles}[kind]
+        bucket = {USER: model.users, GROUP: model.groups}[kind]
         for principal in bucket.values():
             if principal.name.lower() == name.lower():
                 return principal

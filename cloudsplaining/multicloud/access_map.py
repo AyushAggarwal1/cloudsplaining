@@ -1,12 +1,12 @@
-"""Build a policy -> principals -> actions access map from a multi-cloud report.
+"""Build a permission-set -> principals -> actions access map from a multi-cloud report.
 
 Given the report dict produced by
-:func:`cloudsplaining.multicloud.report_aws.render`, this flattens every policy
-(across ``aws_managed_policies`` / ``customer_managed_policies`` /
-``inline_policies``) into a row describing:
+:func:`cloudsplaining.multicloud.serialize.render`, this flattens every
+permission set (the ``roles`` collection for Azure/GCP, ``policies`` for OCI)
+into a row describing:
 
-* which users / groups / roles the policy is attached to (``AttachedTo``), and
-* the full set of actions/permissions the policy grants.
+* which users / groups (and public members, for GCP) it is attached to, and
+* the full set of actions/permissions it grants.
 
 The granted actions are read from whichever provider-specific metadata field the
 engine stored: Azure ``Actions``/``DataActions``, GCP ``IncludedPermissions``, or
@@ -24,7 +24,7 @@ import csv
 import io
 from typing import Any
 
-from cloudsplaining.multicloud.report_aws import policy_collection_keys
+from cloudsplaining.multicloud.serialize import permission_collection_key
 
 _RANK = {"none": 0, "info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 _CATEGORIES = (
@@ -68,33 +68,33 @@ def _worst_severity(entry: dict[str, Any]) -> str:
 
 
 def build(report: dict[str, Any], only_attached: bool = False) -> list[dict[str, Any]]:
-    """Return one row per policy. ``only_attached`` drops unattached policies."""
+    """Return one row per permission set. ``only_attached`` drops unattached ones."""
     provider = report.get("provider", "")
+    collection = permission_collection_key(provider)
     rows: list[dict[str, Any]] = []
-    for collection in policy_collection_keys(report):
-        for entry in report.get(collection, {}).values():
-            attached = entry.get("AttachedTo", {}) or {}
-            users = list(attached.get("users", []))
-            groups = list(attached.get("groups", []))
-            roles = list(attached.get("roles", []))
-            if only_attached and not (users or groups or roles):
-                continue
-            actions = _granted_actions(entry)
-            rows.append(
-                {
-                    "provider": provider,
-                    "policyType": collection,
-                    "policyName": entry.get("PolicyName", "?"),
-                    "policyId": entry.get("PolicyId", ""),
-                    "severity": _worst_severity(entry),
-                    "users": users,
-                    "groups": groups,
-                    "roles": roles,
-                    "attachmentCount": entry.get("AttachmentCount", 0),
-                    "actionCount": len(actions),
-                    "actions": actions,
-                }
-            )
+    for entry in report.get(collection, {}).values():
+        attached = entry.get("AttachedTo", {}) or {}
+        users = list(attached.get("users", []))
+        groups = list(attached.get("groups", []))
+        public = list(attached.get("public", []))
+        if only_attached and not (users or groups or public):
+            continue
+        actions = _granted_actions(entry)
+        rows.append(
+            {
+                "provider": provider,
+                "policyType": entry.get("roleType") or entry.get("policyType") or collection,
+                "policyName": entry.get("RoleName") or entry.get("PolicyName") or "?",
+                "policyId": entry.get("RoleId") or entry.get("PolicyId") or "",
+                "severity": _worst_severity(entry),
+                "users": users,
+                "groups": groups,
+                "public": public,
+                "attachmentCount": entry.get("AttachmentCount", 0),
+                "actionCount": len(actions),
+                "actions": actions,
+            }
+        )
     rows.sort(key=lambda r: (-_RANK.get(r["severity"], 0), -r["attachmentCount"], r["policyName"]))
     return rows
 
@@ -109,7 +109,7 @@ def render_csv(rows: list[dict[str, Any]]) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
-        ["provider", "policyType", "policyName", "severity", "users", "groups", "roles", "actionCount", "actions"]
+        ["provider", "policyType", "policyName", "severity", "users", "groups", "public", "actionCount", "actions"]
     )
     for row in rows:
         writer.writerow(
@@ -120,7 +120,7 @@ def render_csv(rows: list[dict[str, Any]]) -> str:
                 row["severity"],
                 "; ".join(row["users"]),
                 "; ".join(row["groups"]),
-                "; ".join(row["roles"]),
+                "; ".join(row["public"]),
                 row["actionCount"],
                 "; ".join(row["actions"]),
             ]
@@ -137,8 +137,8 @@ def render_console(rows: list[dict[str, Any]], max_actions: int = 15) -> str:
             attached.append(f"users: {', '.join(row['users'])}")
         if row["groups"]:
             attached.append(f"groups: {', '.join(row['groups'])}")
-        if row["roles"]:
-            attached.append(f"roles: {', '.join(row['roles'])}")
+        if row["public"]:
+            attached.append(f"public: {', '.join(row['public'])}")
         lines.append(f"  AttachedTo : {' | '.join(attached) or 'unattached'}")
         actions = row["actions"]
         shown = ", ".join(actions[:max_actions])

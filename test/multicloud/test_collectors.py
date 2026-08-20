@@ -204,12 +204,12 @@ class TestCollectors(unittest.TestCase):
 
     def test_oci_snapshot_round_trips_through_engine(self):
         from cloudsplaining.multicloud.oci.engine import OciProvider
-        from cloudsplaining.multicloud.report_aws import render
+        from cloudsplaining.multicloud.serialize import render
 
         collector = get_collector("oci", tenancy_id="ocid.tenancy", client=_FakeIdentityClient())
         report = render(OciProvider().scan(collector.collect()))
         self.assertEqual(len(report["users"]), 1)
-        self.assertTrue(report["customer_managed_policies"])
+        self.assertTrue(report["policies"])
 
     def test_base_is_abstract(self):
         self.assertTrue(issubclass(Collector, object))

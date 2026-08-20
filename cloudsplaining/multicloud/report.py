@@ -1,8 +1,8 @@
-"""Render the AWS-shaped multi-cloud report dict to the console or HTML.
+"""Render the multi-cloud report dict to the console or HTML.
 
 Both renderers consume the dict produced by
-:func:`cloudsplaining.multicloud.report_aws.render` (the same structure as the
-AWS ``iam-findings-default.json``).
+:func:`cloudsplaining.multicloud.serialize.render` (provider-native keys:
+``users``/``groups`` plus ``roles`` for Azure/GCP or ``policies`` for OCI).
 """
 
 # Copyright (c) 2020, salesforce.com, inc.
@@ -16,7 +16,7 @@ import html
 from typing import Any
 
 from cloudsplaining.multicloud.analysis import CATEGORY_ORDER
-from cloudsplaining.multicloud.report_aws import policy_collection_keys
+from cloudsplaining.multicloud.serialize import permission_collection_key
 
 _COLORS = {
     "critical": "\033[1;35m",
@@ -38,7 +38,11 @@ _HTML_BADGE = {
     "none": "#9e9e9e",
 }
 
-_IDENTITY_COLLECTIONS = ("users", "groups", "roles")
+_IDENTITY_COLLECTIONS = ("users", "groups")
+
+
+def _entry_name(entry: dict[str, Any]) -> str:
+    return entry.get("RoleName") or entry.get("PolicyName") or "?"
 
 
 def _policy_severity(entry: dict[str, Any]) -> str:
@@ -51,12 +55,12 @@ def _policy_severity(entry: dict[str, Any]) -> str:
 
 
 def _flagged_policies(report: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
-    """Return (collection, policy_id, entry) for every policy that has findings."""
+    """Return (collection, policy_id, entry) for every permission set with findings."""
     out = []
-    for collection in policy_collection_keys(report):
-        for pid, entry in report.get(collection, {}).items():
-            if any((entry.get(cat) or {}).get("findings") for cat in CATEGORY_ORDER):
-                out.append((collection, pid, entry))
+    collection = permission_collection_key(report.get("provider", ""))
+    for pid, entry in report.get(collection, {}).items():
+        if any((entry.get(cat) or {}).get("findings") for cat in CATEGORY_ORDER):
+            out.append((collection, pid, entry))
     out.sort(key=lambda t: -_RANK.get(_policy_severity(t[2]), 0))
     return out
 
@@ -68,7 +72,7 @@ def render_console(report: dict[str, Any], use_color: bool = True) -> str:
     lines.append(title)
     lines.append("=" * len(title))
 
-    collections = (*_IDENTITY_COLLECTIONS, *policy_collection_keys(report))
+    collections = (*_IDENTITY_COLLECTIONS, permission_collection_key(report.get("provider", "")))
     counts = {k: len(report.get(k, {})) for k in collections}
     lines.append("Inventory: " + ", ".join(f"{counts[k]} {k.replace('_', ' ')}" for k in collections if counts[k]))
 
@@ -93,7 +97,7 @@ def render_console(report: dict[str, Any], use_color: bool = True) -> str:
 
     for collection, _pid, entry in flagged:
         sev = _policy_severity(entry)
-        name = entry.get("PolicyName", "?")
+        name = _entry_name(entry)
         lines.append(f"{_c(sev, use_color)}[{sev.upper()}] {name}{_r(use_color)}  ({collection})")
         attached = entry.get("AttachedTo", {})
         att = ", ".join(f"{k}={len(v)}" for k, v in attached.items() if v) or "unattached"
@@ -137,7 +141,7 @@ def render_html(report: dict[str, Any]) -> str:
     inv = "".join(
         f'<div class="card"><span class="num">{len(report.get(k, {}))}</span>'
         f'<span class="lbl">{k.replace("_", " ")}</span></div>'
-        for k in (*_IDENTITY_COLLECTIONS, *policy_collection_keys(report))
+        for k in (*_IDENTITY_COLLECTIONS, permission_collection_key(report.get("provider", "")))
     )
     rows = "\n".join(_html_row(c, e) for c, _pid, e in flagged) or ('<tr><td colspan="5">No policy findings.</td></tr>')
 
@@ -181,7 +185,7 @@ def render_html(report: dict[str, Any]) -> str:
 def _html_row(collection: str, entry: dict[str, Any]) -> str:
     sev = _policy_severity(entry)
     color = _HTML_BADGE.get(sev, "#9e9e9e")
-    name = html.escape(str(entry.get("PolicyName", "?")))
+    name = html.escape(str(_entry_name(entry)))
     attached = entry.get("AttachedTo", {})
     att = html.escape(", ".join(f"{k}: {', '.join(v)}" for k, v in attached.items() if v) or "unattached")
     detail_parts = []

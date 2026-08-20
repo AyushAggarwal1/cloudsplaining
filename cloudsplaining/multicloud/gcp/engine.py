@@ -13,6 +13,12 @@ Snapshot schema (all keys optional; parsed JSON)::
 Users and groups not listed under ``identities`` are inferred from binding
 members. Backward compatibility: a bare list, ``{"bindings": [...]}``, or a raw
 ``get-iam-policy`` object (``{"bindings": [...], "etag": ...}``) all work.
+
+GCP roles (basic, predefined, and custom) become the report's ``roles``
+collection, each entry carrying its ``roleType``. Service accounts are users
+with ``provider_kind: "service_account"``. Public members (``allUsers`` /
+``allAuthenticatedUsers``) are recorded on the role's ``AttachedTo.public``
+list instead of being synthesized as principals.
 """
 
 # Copyright (c) 2020, salesforce.com, inc.
@@ -28,10 +34,7 @@ from cloudsplaining.multicloud.analysis import analyze_gcp_role
 from cloudsplaining.multicloud.findings import PUBLIC_ACCESS
 from cloudsplaining.multicloud.gcp import constants as c
 from cloudsplaining.multicloud.model import (
-    CUSTOMER,
     GROUP,
-    MANAGED,
-    ROLE,
     USER,
     AccountModel,
     Policy,
@@ -42,6 +45,15 @@ from cloudsplaining.multicloud.provider import Provider
 
 def _norm(value: str) -> str:
     return value.strip().lower()
+
+
+def _role_type(role_name: str) -> str:
+    """basic (owner/editor/viewer) | predefined (``roles/*``) | custom."""
+    if role_name in c.BASIC_ROLES:
+        return "basic"
+    if role_name.startswith("roles/"):
+        return "predefined"
+    return "custom"
 
 
 class GcpProvider(Provider):
@@ -109,22 +121,22 @@ class GcpProvider(Provider):
     def _add_roles(self, snapshot: dict[str, Any], model: AccountModel) -> dict[str, Policy]:
         index: dict[str, Policy] = {}
         for role in snapshot.get("predefinedRoles", []) or []:
-            index.update(self._add_role(role, MANAGED, model))
+            index.update(self._add_role(role, model))
         for role in snapshot.get("customRoles", []) or snapshot.get("roles", []) or []:
-            index.update(self._add_role(role, CUSTOMER, model))
+            index.update(self._add_role(role, model))
         return index
 
     @staticmethod
-    def _add_role(role: dict[str, Any], kind: str, model: AccountModel) -> dict[str, Policy]:
+    def _add_role(role: dict[str, Any], model: AccountModel) -> dict[str, Policy]:
         name = role.get("name") or role.get("title") or "<unknown role>"
         permissions = role.get("includedPermissions", []) or []
         categories = analyze_gcp_role(permissions)
         policy = Policy(
             id=str(name),
             name=str(name),
-            kind=kind,
             categories=categories.result(),
             metadata={
+                "roleType": _role_type(str(name)),
                 "stage": role.get("stage"),
                 "title": role.get("title"),
                 "Path": "/",
@@ -139,6 +151,8 @@ class GcpProvider(Provider):
                 ],
             },
         )
+        # The public list is part of the GCP contract even when empty.
+        policy.attached_to.setdefault("public", [])
         model.add_policy(policy)
         return {str(name): policy}
 
@@ -156,19 +170,21 @@ class GcpProvider(Provider):
                 policy = self._reference_policy(role_name, model)
 
             for member in binding.get("members", []) or []:
+                if _norm(member) in c.PUBLIC_MEMBERS:
+                    if member not in policy.attached_to["public"]:
+                        policy.attached_to["public"].append(member)
+                    self._flag_public(policy, member)
+                    continue
                 principal = self._resolve_member(member, model)
                 if principal is None:
                     continue
                 model.attach(principal, policy)
-                if _norm(member) in c.PUBLIC_MEMBERS:
-                    self._flag_public(policy, member)
 
     @staticmethod
     def _reference_policy(role_name: str, model: AccountModel) -> Policy:
         existing = model.policies.get(role_name)
         if existing is not None:
             return existing
-        kind = MANAGED if role_name.startswith("roles/") else CUSTOMER
         # Basic roles get a baseline finding even without permission expansion.
         from cloudsplaining.multicloud.analysis import Categories
 
@@ -184,9 +200,9 @@ class GcpProvider(Provider):
         policy = Policy(
             id=role_name,
             name=role_name,
-            kind=kind,
             categories=cats.result(),
             metadata={
+                "roleType": _role_type(role_name),
                 "Path": "/",
                 "PolicyVersionList": [
                     {
@@ -197,6 +213,7 @@ class GcpProvider(Provider):
                 ],
             },
         )
+        policy.attached_to.setdefault("public", [])
         model.add_policy(policy)
         return policy
 
@@ -209,22 +226,35 @@ class GcpProvider(Provider):
 
     @staticmethod
     def _resolve_member(member: str, model: AccountModel) -> Principal | None:
-        lower = _norm(member)
-        if lower in c.PUBLIC_MEMBERS:
-            kind, name = ROLE, member  # represent public members as a synthetic role-like principal
-            return model.add_principal(Principal(id=member, name=name, kind=kind))
-        if ":" not in member:
-            return model.add_principal(Principal(id=member, name=member, kind=ROLE))
-        member_type, value = member.split(":", 1)
-        if member_type.lower() == "serviceaccount":
-            existing = model.get_principal(USER, member)
+        rest = member
+        deleted = rest.startswith("deleted:")
+        if deleted:
+            rest = rest[len("deleted:") :]
+        if ":" not in rest:
+            return model.add_principal(
+                Principal(id=member, name=member, kind=USER, metadata={"provider_kind": "unknown"})
+            )
+        member_type, value = rest.split(":", 1)
+        member_type = member_type.lower()
+        # Deleted members carry a "?uid=..." disambiguation suffix; the name is
+        # the identity itself, the raw member string stays as the id.
+        name = value.split("?uid=", 1)[0]
+
+        if member_type in ("group", "domain"):
+            existing = model.get_principal(GROUP, member)
             if existing is not None:
                 return existing
-            return model.add_principal(
-                Principal(id=member, name=value, kind=USER, metadata={"provider_kind": "service_account"})
-            )
-        kind = {"user": USER, "group": GROUP, "domain": GROUP}.get(member_type.lower(), ROLE)
-        existing = model.get_principal(kind, member)
+            group_metadata: dict[str, Any] = {"deleted": True} if deleted else {}
+            return model.add_principal(Principal(id=member, name=name, kind=GROUP, metadata=group_metadata))
+
+        metadata: dict[str, Any] = {}
+        if member_type == "serviceaccount":
+            metadata["provider_kind"] = "service_account"
+        elif member_type != "user":
+            metadata["provider_kind"] = "unknown"
+        if deleted:
+            metadata["deleted"] = True
+        existing = model.get_principal(USER, member)
         if existing is not None:
             return existing
-        return model.add_principal(Principal(id=member, name=value, kind=kind))
+        return model.add_principal(Principal(id=member, name=name, kind=USER, metadata=metadata))

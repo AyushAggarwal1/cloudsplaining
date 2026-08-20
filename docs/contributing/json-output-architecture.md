@@ -20,9 +20,11 @@ Paths use these placeholders:
   object ID, GCP member string, or OCI OCID.
 - `{policy_id}` is a dynamic map key such as an AWS policy ID, Azure role GUID,
   GCP role name, or OCI policy OCID.
-- `{provider}_managed_policies` means `aws_managed_policies`,
-  `azure_managed_policies`, `gcp_managed_policies`, or
-  `oci_managed_policies`.
+- The permission-set collection is provider-native: AWS keeps
+  `aws_managed_policies` / `customer_managed_policies` / `inline_policies`,
+  while `scan-cloud` reports emit a single `roles` collection (Azure and GCP)
+  or `policies` collection (OCI) with a `roleType` / `policyType` field per
+  entry.
 
 There are four kinds of field provenance:
 
@@ -67,7 +69,7 @@ flowchart LR
         GCP_ENGINE[GcpProvider]
         OCI_ENGINE[OciProvider]
         MODEL[AccountModel<br/>identity-policy graph]
-        MULTI_SERIALIZER[report_aws.render]
+        MULTI_SERIALIZER[serialize.render]
     end
 
     subgraph Enrichment[Lifecycle enrichment]
@@ -120,10 +122,10 @@ IDs, while every policy records the principal names to which it is attached:
 
 ```mermaid
 flowchart LR
-    PRINCIPALS[groups / users / roles]
-    POINTERS[policy-id to policy-name pointers]
-    POLICIES[provider-managed / customer-managed / inline policies]
-    ATTACHED[AttachedTo<br/>users, groups, roles]
+    PRINCIPALS[users / groups<br/>plus roles on AWS]
+    POINTERS[permission-set id to name pointers]
+    POLICIES[AWS policy collections, or<br/>roles Azure/GCP, policies OCI]
+    ATTACHED[AttachedTo<br/>users, groups; roles on AWS;<br/>public on GCP]
     CATEGORIES[Risk-category blocks]
 
     PRINCIPALS --> POINTERS --> POLICIES
@@ -156,7 +158,7 @@ The `scan` command reads that snapshot; it does not call AWS APIs.
 | `role_assignments.list_for_subscription()` | `roleAssignments[].principalId`, `principalType`, `roleDefinitionId`, `scope` | Connects principals to role definitions. |
 | Microsoft Graph `/users` | `users[]` | Supplies users and `id`, UPN, display name, enabled state, type, creation time, and optional sign-in activity. |
 | Microsoft Graph `/groups` and `/groups/{id}/members` | `groups[]`, `groupMemberships` | Supplies groups and user-to-group relationships. |
-| Microsoft Graph `/servicePrincipals` | `servicePrincipals[]` | Supplies workload identities represented as report roles. |
+| Microsoft Graph `/servicePrincipals` | `servicePrincipals[]` | Supplies workload identities represented as report users with `provider_kind: "service_principal"`. |
 | Microsoft Graph directory audits | `directoryAudits[]` | Best-effort creator attribution for users and service principals. |
 | Microsoft Graph beta service-principal sign-in report | `servicePrincipalSignInActivities[]` | Best-effort last-used data for service principals. |
 
@@ -187,7 +189,7 @@ caller lacks permission.
 | --- | --- | --- |
 | Identity `list_users` | `users[]` | Supplies user identity, creation, login, MFA, and capability fields. |
 | Identity `list_groups` | `groups[]` | Supplies group principals. |
-| Identity `list_dynamic_groups` | `dynamicGroups[]` | Supplies workload identities represented as report roles. |
+| Identity `list_dynamic_groups` | `dynamicGroups[]` | Supplies workload identities represented as report groups with `provider_kind: "dynamic_group"`. |
 | Identity `list_policies` for the tenancy and its immediate compartments | `policies[].id`, `name`, `compartmentId`, `statements` | Supplies customer policy statements. |
 | Identity `list_user_group_memberships` | `groupMemberships` | Connects users to groups. |
 | Audit `list_events` around identity creation times | `auditEvents[]` | Best-effort creator attribution for users and dynamic groups. |
@@ -199,15 +201,13 @@ caller lacks permission.
 | --- | --- | --- | --- |
 | `account_id` | string | All | AWS derives it from the first non-provider principal ARN in `roles`, then `users`, then `groups`. Multi-cloud reports copy the collector's subscription ID, project ID, or tenancy OCID. It is empty for older/bare inputs without account scope. |
 | `provider` | string | Azure, GCP, OCI | Static provider name from `AccountModel.provider`. The legacy AWS serializer intentionally does not emit this field. |
-| `groups` | object | All | Dynamic principal map. AWS builds it from `GroupDetailList`; provider engines build it from their normalized `AccountModel.groups`. |
-| `users` | object | All | Dynamic principal map. AWS builds it from `UserDetailList`; provider engines build it from enumerated or binding-inferred identities. |
-| `roles` | object | All | Dynamic role/workload map. AWS uses IAM roles; Azure uses service principals/managed identities; GCP uses synthetic role-like principals for public or otherwise untyped members; OCI uses dynamic groups and synthesized policy subjects. |
+| `groups` | object | All | Dynamic principal map. AWS builds it from `GroupDetailList`; provider engines build it from their normalized `AccountModel.groups`. OCI dynamic groups live here with `provider_kind: "dynamic_group"`. |
+| `users` | object | All | Dynamic principal map. AWS builds it from `UserDetailList`; provider engines build it from enumerated or binding-inferred identities. Azure service principals/managed identities (`provider_kind: "service_principal"`) and GCP service accounts (`provider_kind: "service_account"`) live here; deleted GCP members carry `deleted: true`. |
+| `roles` | object | AWS, Azure, GCP | Two different meanings. AWS: IAM roles (assumable principals). Azure/GCP: the permission-set collection — Azure role definitions with `roleType: BuiltInRole \| CustomRole`, GCP roles with `roleType: basic \| predefined \| custom` — with `RoleName`/`RoleId` entry fields. |
+| `policies` | object | OCI | OCI's permission-set collection: policies with `PolicyName`/`PolicyId`, raw `statements`, parsed `GrantedAccess`, and `policyType: tenancy \| compartment` derived from the `compartmentId` prefix. |
 | `aws_managed_policies` | object | AWS | Attached AWS-managed IAM policies, selected by ARN prefix. |
-| `azure_managed_policies` | object | Azure | Azure role definitions whose `roleType` does not contain `custom`. |
-| `gcp_managed_policies` | object | GCP | GCP predefined roles whose names start with `roles/`. |
-| `oci_managed_policies` | object | OCI | Present for schema symmetry. It is empty because the OCI engine currently creates only customer policies. |
-| `customer_managed_policies` | object | All | AWS customer-managed IAM policies, Azure custom roles, GCP custom roles, or OCI policies. |
-| `inline_policies` | object | All | AWS inline user/group/role policies. It is currently empty for Azure, GCP, and OCI because those engines create no `INLINE` policies. |
+| `customer_managed_policies` | object | AWS | AWS customer-managed IAM policies. |
+| `inline_policies` | object | AWS | AWS inline user/group/role policies. |
 | `exclusions` | object | All | Pass-through of the active exclusions configuration. AWS can load a custom YAML file; `scan-cloud` currently calls the serializer with the packaged defaults. |
 | `links` | object | All | AWS maps risky action names to policy_sentry documentation URLs. Multi-cloud serializers currently emit an empty object. |
 | `identity_inventory` | array | All snapshot-object scans | A separate full identity census appended after policy report serialization. It is absent when `scan-cloud` receives a bare OCI statement list because that input has no identity snapshot. |

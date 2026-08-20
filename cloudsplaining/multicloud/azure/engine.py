@@ -13,6 +13,10 @@ Snapshot schema (all keys optional; parsed JSON)::
 
 Backward compatibility: a bare list (or ``{"roleDefinitions": [...]}``) is treated
 as role definitions only, with empty identity collections.
+
+Role definitions (built-in and custom) become the report's ``roles``
+collection, each entry carrying its ``roleType``. Service principals and
+managed identities are users with ``provider_kind: "service_principal"``.
 """
 
 # Copyright (c) 2020, salesforce.com, inc.
@@ -26,10 +30,7 @@ from typing import Any
 
 from cloudsplaining.multicloud.analysis import analyze_azure_role
 from cloudsplaining.multicloud.model import (
-    CUSTOMER,
     GROUP,
-    MANAGED,
-    ROLE,
     USER,
     AccountModel,
     Policy,
@@ -37,14 +38,14 @@ from cloudsplaining.multicloud.model import (
 )
 from cloudsplaining.multicloud.provider import Provider
 
-# principalType (from role assignments / Graph) -> our principal kind
+# principalType (from role assignments / Graph) -> (kind, provider_kind)
 _PRINCIPAL_KIND = {
-    "user": USER,
-    "group": GROUP,
-    "serviceprincipal": ROLE,
-    "managedidentity": ROLE,
-    "msi": ROLE,
-    "foreigngroup": GROUP,
+    "user": (USER, "user"),
+    "group": (GROUP, "group"),
+    "serviceprincipal": (USER, "service_principal"),
+    "managedidentity": (USER, "service_principal"),
+    "msi": (USER, "service_principal"),
+    "foreigngroup": (GROUP, "group"),
 }
 
 
@@ -116,8 +117,11 @@ class AzureProvider(Provider):
                 Principal(
                     id=str(pid),
                     name=str(name),
-                    kind=ROLE,
-                    metadata={"servicePrincipalType": sp.get("servicePrincipalType")},
+                    kind=USER,
+                    metadata={
+                        "provider_kind": "service_principal",
+                        "servicePrincipalType": sp.get("servicePrincipalType"),
+                    },
                 )
             )
 
@@ -126,8 +130,6 @@ class AzureProvider(Provider):
         for role in snapshot.get("roleDefinitions", []) or []:
             role_name = role.get("roleName") or role.get("name") or role.get("id") or "<unknown role>"
             role_id = role.get("id") or role.get("name") or role_name
-            role_type = (role.get("roleType") or role.get("type") or "").lower()
-            kind = CUSTOMER if "custom" in role_type else MANAGED
 
             actions, data_actions = _expand_permissions(role)
             scopes = role.get("assignableScopes", []) or []
@@ -136,11 +138,10 @@ class AzureProvider(Provider):
             policy = Policy(
                 id=str(role_id),
                 name=str(role_name),
-                kind=kind,
                 categories=categories.result(),
                 metadata={
+                    "roleType": role.get("roleType") or role.get("type") or "BuiltInRole",
                     "assignableScopes": scopes,
-                    "roleType": role.get("roleType") or role.get("type"),
                     "Path": "/",
                     # Full set of permissions the role grants (not just the risky ones).
                     "Actions": list(actions),
@@ -179,24 +180,22 @@ class AzureProvider(Provider):
             role_ref = (
                 assignment.get("roleDefinitionId") or assignment.get("roleDefinitionName") or assignment.get("roleName")
             )
-            policy = self._resolve_policy(role_ref, role_def_index, model)
+            policy = self._resolve_policy(role_ref, role_def_index)
             if policy is None:
                 continue
 
-            kind = _PRINCIPAL_KIND.get((assignment.get("principalType") or "").lower())
+            kinds = _PRINCIPAL_KIND.get((assignment.get("principalType") or "").lower())
             principal_id = assignment.get("principalId") or assignment.get("principalName")
             principal_name = assignment.get("principalName") or assignment.get("principalId")
             if principal_id is None:
                 continue
 
-            principal = self._resolve_principal(model, kind, str(principal_id), str(principal_name))
-            if principal is None:
-                continue
+            principal = self._resolve_principal(model, kinds, str(principal_id), str(principal_name))
             model.attach(principal, policy)
 
     # --------------------------------------------------------------- resolving
     @staticmethod
-    def _resolve_policy(role_ref: Any, index: dict[str, Policy], model: AccountModel) -> Policy | None:
+    def _resolve_policy(role_ref: Any, index: dict[str, Policy]) -> Policy | None:
         if role_ref is None:
             return None
         ref = str(role_ref)
@@ -210,18 +209,27 @@ class AzureProvider(Provider):
 
     @staticmethod
     def _resolve_principal(
-        model: AccountModel, kind: str | None, principal_id: str, principal_name: str
-    ) -> Principal | None:
+        model: AccountModel, kinds: tuple[str, str] | None, principal_id: str, principal_name: str
+    ) -> Principal:
         # If we know the kind, look it up; otherwise search all buckets.
-        if kind is not None:
+        if kinds is not None:
+            kind, provider_kind = kinds
             existing = model.get_principal(kind, principal_id)
             if existing is not None:
                 return existing
             # Assignment references an identity we didn't enumerate: synthesize it.
-            return model.add_principal(Principal(id=principal_id, name=principal_name, kind=kind))
-        for k in (USER, GROUP, ROLE):
+            metadata = {} if provider_kind == kind else {"provider_kind": provider_kind}
+            return model.add_principal(Principal(id=principal_id, name=principal_name, kind=kind, metadata=metadata))
+        for k in (USER, GROUP):
             existing = model.get_principal(k, principal_id)
             if existing is not None:
                 return existing
-        # Unknown type and unknown id -> treat as a role (workload identity).
-        return model.add_principal(Principal(id=principal_id, name=principal_name, kind=ROLE))
+        # Unknown type and unknown id -> assume a workload identity.
+        return model.add_principal(
+            Principal(
+                id=principal_id,
+                name=principal_name,
+                kind=USER,
+                metadata={"provider_kind": "service_principal"},
+            )
+        )

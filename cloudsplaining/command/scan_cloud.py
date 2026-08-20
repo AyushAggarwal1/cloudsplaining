@@ -25,7 +25,7 @@ from cloudsplaining.multicloud import get_provider
 from cloudsplaining.multicloud.analysis import CATEGORY_ORDER
 from cloudsplaining.multicloud.provider import SUPPORTED_PROVIDERS
 from cloudsplaining.multicloud.report import render_console, render_html
-from cloudsplaining.multicloud.report_aws import policy_collection_keys, render
+from cloudsplaining.multicloud.serialize import permission_collection_key, render
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +89,8 @@ def scan_cloud(
     provider = get_provider(provider_name)
     model = provider.scan(data)
 
-    # Build the full AWS-shaped report, then optionally prune category findings
-    # below the requested severities.
+    # Build the full report, then optionally prune category findings below the
+    # requested severities.
     report = render(model)
     if isinstance(data, dict):
         # The snapshot doubles as the identity-lifecycle source; statement-list
@@ -121,22 +121,22 @@ def scan_cloud(
 
 def _filter_severities(report: dict[str, Any], wanted: set[str]) -> None:
     """Drop category findings whose severity is not in ``wanted`` (in place)."""
-    for collection in policy_collection_keys(report):
-        for entry in report.get(collection, {}).values():
-            for category in CATEGORY_ORDER:
-                block = entry.get(category)
-                if block and block.get("severity") not in wanted:
-                    block["findings"] = []
-                    block["severity"] = "none"
+    collection = permission_collection_key(report.get("provider", ""))
+    for entry in report.get(collection, {}).values():
+        for category in CATEGORY_ORDER:
+            block = entry.get(category)
+            if block and block.get("severity") not in wanted:
+                block["findings"] = []
+                block["severity"] = "none"
 
 
 def _has_severity(report: dict[str, Any], wanted: set[str]) -> bool:
-    for collection in policy_collection_keys(report):
-        for entry in report.get(collection, {}).values():
-            for category in CATEGORY_ORDER:
-                block = entry.get(category) or {}
-                if block.get("findings") and block.get("severity") in wanted:
-                    return True
+    collection = permission_collection_key(report.get("provider", ""))
+    for entry in report.get(collection, {}).values():
+        for category in CATEGORY_ORDER:
+            block = entry.get(category) or {}
+            if block.get("findings") and block.get("severity") in wanted:
+                return True
     return False
 
 

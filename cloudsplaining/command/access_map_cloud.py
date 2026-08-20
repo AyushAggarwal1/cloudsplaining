@@ -16,6 +16,7 @@ import click
 
 from cloudsplaining import set_log_level
 from cloudsplaining.multicloud import access_map
+from cloudsplaining.multicloud.serialize import permission_collection_key
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,8 @@ def access_map_cloud(
     set_log_level(verbosity)
 
     report = json.loads(Path(input_file).read_text(encoding="utf-8"))
-    if "customer_managed_policies" not in report:
-        logger.critical("Input does not look like a scan-cloud JSON report (no policy collections found).")
+    if permission_collection_key(report.get("provider", "")) not in report:
+        logger.critical("Input does not look like a scan-cloud JSON report (no permission-set collection found).")
         sys.exit(1)
 
     rows = access_map.build(report, only_attached=only_attached)

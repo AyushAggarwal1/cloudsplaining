@@ -19,8 +19,8 @@ class Provider(ABC):
 
     A provider takes that cloud's native IAM snapshot (parsed JSON) and returns
     an :class:`~cloudsplaining.multicloud.model.AccountModel` — the identity +
-    policy graph that :mod:`cloudsplaining.multicloud.report_aws` serializes into
-    the AWS report shape.
+    permission-set graph that :mod:`cloudsplaining.multicloud.serialize` turns
+    into the report dict with provider-native keys.
     """
 
     #: Short, lowercase provider identifier, e.g. ``"azure"``.
