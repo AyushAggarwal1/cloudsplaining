@@ -19,9 +19,9 @@ from typing import Any, Literal, cast, overload
 import click
 import yaml
 from click import Context
-from policy_sentry.util.arns import get_account_from_arn
 
 from cloudsplaining import set_log_level
+from cloudsplaining.identity_inventory.inventory import build_identity_inventory
 from cloudsplaining.output.report import HTMLReport
 from cloudsplaining.scan.authorization_details import AuthorizationDetails
 from cloudsplaining.shared.constants import EXCLUSIONS_FILE
@@ -268,17 +268,13 @@ def scan_account_authorization_details(
         flag_trust_policies=flag_trust_policies,
         severity=severity,
     )
-    results = authorization_details.results
-
-    # Lazy method to get an account ID
-    account_id = ""
-    for role in results.get("roles", []):
-        if "arn:aws:iam::aws:" not in results["roles"][role]["arn"]:
-            account_id = get_account_from_arn(results["roles"][role]["arn"])
-            break
+    results: dict[str, Any] = authorization_details.results
+    # The same authorization details double as the identity-lifecycle source;
+    # the inventory is a full census and does not honor finding exclusions.
+    results["identity_inventory"] = build_identity_inventory("aws", account_authorization_details_cfg)
 
     html_report = HTMLReport(
-        account_id=account_id,
+        account_id=results.get("account_id", ""),
         account_name=account_name,
         results=results,
         minimize=minimize,
@@ -290,7 +286,7 @@ def scan_account_authorization_details(
         output_directory = Path(output_directory) if output_directory else Path.cwd()
 
         results_data_file = output_directory / f"iam-results-{account_name}.json"
-        results_data_filepath = write_results_data_file(authorization_details.results, results_data_file)
+        results_data_filepath = write_results_data_file(results, results_data_file)
         print(f"Results data saved: {results_data_filepath}")
 
         findings_data_file = output_directory / f"iam-findings-{account_name}.json"
@@ -299,7 +295,7 @@ def scan_account_authorization_details(
 
     if return_json_results:
         return {
-            "iam_results": authorization_details.results,
+            "iam_results": results,
             "iam_findings": results,
             "rendered_report": rendered_report,
         }

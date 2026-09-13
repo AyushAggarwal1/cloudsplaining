@@ -1,0 +1,50 @@
+{
+  "users": [
+    {"id": "ocid1.user.oc1..alice", "name": "alice"},
+    {"id": "ocid1.user.oc1..bob", "name": "bob"}
+  ],
+  "groups": [
+    {"id": "ocid1.group.oc1..admins", "name": "Administrators"},
+    {"id": "ocid1.group.oc1..iam", "name": "IAMAdmins"},
+    {"id": "ocid1.group.oc1..app", "name": "AppTeam"}
+  ],
+  "dynamicGroups": [
+    {"id": "ocid1.dynamicgroup.oc1..instances", "name": "AppInstances", "matching-rule": "instance.compartment.id = 'ocid1.compartment.oc1..bbbb'"}
+  ],
+  "groupMemberships": {
+    "Administrators": ["alice"],
+    "IAMAdmins": ["alice"],
+    "AppTeam": ["bob"]
+  },
+  "policies": [
+    {
+      "id": "ocid1.policy.oc1..tenancyadmins",
+      "name": "tenancy-admins",
+      "compartmentId": "ocid1.tenancy.oc1..aaaa",
+      "statements": [
+        "Allow group Administrators to manage all-resources in tenancy",
+        "Allow group IAMAdmins to manage policies in tenancy",
+        "Allow group IAMAdmins to manage groups in tenancy"
+      ]
+    },
+    {
+      "id": "ocid1.policy.oc1..appteam",
+      "name": "app-team",
+      "compartmentId": "ocid1.compartment.oc1..bbbb",
+      "statements": [
+        "Allow group AppTeam to manage object-family in compartment AppCompartment",
+        "Allow group AppTeam to read buckets in tenancy",
+        "Allow group AppTeam to manage secret-family in compartment AppCompartment",
+        "Allow dynamic-group AppInstances to use instance-family in compartment AppCompartment where request.region = 'us-ashburn-1'"
+      ]
+    },
+    {
+      "id": "ocid1.policy.oc1..public",
+      "name": "public-oops",
+      "compartmentId": "ocid1.compartment.oc1..cccc",
+      "statements": [
+        "Allow any-user to manage buckets in tenancy"
+      ]
+    }
+  ]
+}

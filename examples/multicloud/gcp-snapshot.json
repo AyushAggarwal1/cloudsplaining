@@ -1,0 +1,28 @@
+{
+  "serviceAccounts": [
+    {"email": "terraform@acme-prod.iam.gserviceaccount.com", "uniqueId": "100000000000000000001", "displayName": "Terraform"},
+    {"email": "ci@acme-prod.iam.gserviceaccount.com", "uniqueId": "100000000000000000002", "displayName": "CI"}
+  ],
+  "identities": {
+    "users": ["root@acme.com"],
+    "groups": ["devs@acme.com"]
+  },
+  "customRoles": [
+    {
+      "name": "projects/acme-prod/roles/deployBot",
+      "title": "Deploy Bot",
+      "stage": "GA",
+      "includedPermissions": ["resourcemanager.projects.setIamPolicy", "iam.serviceAccounts.actAs", "iam.serviceAccountKeys.create", "storage.objects.get", "compute.firewalls.create"]
+    }
+  ],
+  "predefinedRoles": [
+    {"name": "roles/owner", "title": "Owner", "includedPermissions": ["resourcemanager.projects.setIamPolicy", "iam.serviceAccounts.actAs"]},
+    {"name": "roles/iam.serviceAccountTokenCreator", "title": "Service Account Token Creator", "includedPermissions": ["iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.actAs"]}
+  ],
+  "bindings": [
+    {"role": "roles/owner", "members": ["user:root@acme.com", "serviceAccount:terraform@acme-prod.iam.gserviceaccount.com"], "resource": "projects/acme-prod"},
+    {"role": "projects/acme-prod/roles/deployBot", "members": ["serviceAccount:ci@acme-prod.iam.gserviceaccount.com"], "resource": "projects/acme-prod"},
+    {"role": "roles/iam.serviceAccountTokenCreator", "members": ["group:devs@acme.com"], "resource": "projects/acme-prod"},
+    {"role": "roles/storage.objectViewer", "members": ["allUsers"], "resource": "projects/acme-prod"}
+  ]
+}

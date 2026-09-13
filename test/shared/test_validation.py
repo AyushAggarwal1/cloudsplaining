@@ -21,6 +21,18 @@ class FindExcessiveWildcardsTestCase(unittest.TestCase):
             decision = check_authorization_details_schema(cfg)
         self.assertTrue(decision)
 
+    def test_authorization_details_schema_allows_inventory_enrichment_keys(self):
+        """Enriched downloads carry credentialReport/cloudTrailEvents alongside the four AWS keys."""
+        cfg = {
+            "UserDetailList": [],
+            "GroupDetailList": [],
+            "RoleDetailList": [],
+            "Policies": [],
+            "credentialReport": "user,arn\nalice,arn:aws:iam::1:user/alice\n",
+            "cloudTrailEvents": [],
+        }
+        self.assertTrue(check_authorization_details_schema(cfg))
+
     def test_exclusions_error(self):
         """shared.validation.check_exclusions_schema: Make sure an exception is raised if the format is incorrect"""
         exclusions_cfg = {
