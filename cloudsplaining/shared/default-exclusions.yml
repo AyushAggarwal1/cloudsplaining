@@ -6,7 +6,7 @@ policies:
   - "*ServiceLinkedRolePolicy"
   - "AdministratorAccess" # Otherwise, this will take a long time
   - "service-role*"
-  - "aws-service-role*"
+  # - "aws-service-role*"
   - "/service-role*"
   - "/aws-service-role*"
   - "MyRole"

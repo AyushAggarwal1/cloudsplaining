@@ -45,8 +45,8 @@ class ExclusionsTestCase(unittest.TestCase):
 
 class AuthorizationsFileComponentsExclusionsTestCase(unittest.TestCase):
     def test_exclusions_for_service_roles(self):
-        """test_exclusions_for_service_roles: Ensuring that exclusions config of service roles are specifically
-        skipped, as designed"""
+        """test_exclusions_for_service_roles: AWS service-linked roles stay in the results (so role totals match
+        the account) but are marked excluded and none of their policies are evaluated, as designed"""
         authz_file = {
             "UserDetailList": [],
             "GroupDetailList": [],
@@ -111,10 +111,37 @@ class AuthorizationsFileComponentsExclusionsTestCase(unittest.TestCase):
         results = authorization_details.results
 
         expected_results = {
-            "account_id": "",
+            "account_id": "115657980943",
             "groups": {},
             "users": {},
-            "roles": {},
+            "roles": {
+                "LALALALALAALALA": {
+                    "arn": "arn:aws:iam::115657980943:role/aws-service-role/cloudwatch-crossaccount.amazonaws.com/AWSServiceRoleForCloudWatchCrossAccount",
+                    "assume_role_policy": {
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Principal": {"Service": "cloudwatch-crossaccount.amazonaws.com"},
+                                    "Action": "sts:AssumeRole",
+                                }
+                            ],
+                        }
+                    },
+                    "create_date": "2019-11-07 20:21:23+00:00",
+                    "role_last_used": None,
+                    "id": "LALALALALAALALA",
+                    "name": "AWSServiceRoleForCloudWatchCrossAccount",
+                    "inline_policies": {},
+                    "instance_profiles": [],
+                    "instances_count": 0,
+                    "path": "/aws-service-role/cloudwatch-crossaccount.amazonaws.com/",
+                    "customer_managed_policies": {},
+                    "aws_managed_policies": {},
+                    "is_excluded": True,
+                }
+            },
             "aws_managed_policies": {},
             "customer_managed_policies": {},
             "inline_policies": {},

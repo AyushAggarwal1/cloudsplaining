@@ -14,6 +14,8 @@ import unittest
 from click.testing import CliRunner
 
 from cloudsplaining.bin.cli import cloudsplaining as cloudsplaining_cli
+from cloudsplaining.scan.managed_policy_detail import ManagedPolicyDetails
+from cloudsplaining.scan.role_details import RoleDetailList
 from cloudsplaining.shared.exclusions import is_name_excluded, set_exclusion_output
 
 
@@ -76,3 +78,74 @@ class ExclusionOutputRoutingTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _service_linked_role(name, service):
+    return {
+        "Path": f"/aws-service-role/{service}.amazonaws.com/",
+        "RoleName": name,
+        "RoleId": f"AROAEXAMPLE{name[-8:].upper()}",
+        "Arn": f"arn:aws:iam::111122223333:role/aws-service-role/{service}.amazonaws.com/{name}",
+        "CreateDate": "2023-01-02 11:24:31+00:00",
+        "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow", "Principal": {"Service": f"{service}.amazonaws.com"}, "Action": "sts:AssumeRole"}
+            ],
+        },
+        "InstanceProfileList": [],
+        "RolePolicyList": [],
+        "AttachedManagedPolicies": [],
+    }
+
+
+class ServiceLinkedRoleSummaryTestCase(unittest.TestCase):
+    """Building a RoleDetailList reports how many AWS service-linked roles were set aside, once, through the
+    same routing as the per-match exclusion messages."""
+
+    def setUp(self):
+        self.addCleanup(set_exclusion_output, False)
+        set_exclusion_output(False)
+
+    @staticmethod
+    def _build_role_detail_list():
+        roles = [
+            _service_linked_role("AWSServiceRoleForAmazonEKS", "eks"),
+            _service_linked_role("AWSServiceRoleForSupport", "support"),
+            {
+                "Path": "/",
+                "RoleName": "customer-role",
+                "RoleId": "AROAEXAMPLECUSTOMER1",
+                "Arn": "arn:aws:iam::111122223333:role/customer-role",
+                "CreateDate": "2023-01-02 11:24:31+00:00",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {"Effect": "Allow", "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}
+                    ],
+                },
+                "InstanceProfileList": [],
+                "RolePolicyList": [],
+                "AttachedManagedPolicies": [],
+            },
+        ]
+        return RoleDetailList(roles, ManagedPolicyDetails([]))
+
+    def test_library_default_logs_summary_at_debug_and_stays_quiet(self):
+        buffer = io.StringIO()
+        with (
+            self.assertLogs("cloudsplaining.shared.exclusions", level="DEBUG") as captured,
+            contextlib.redirect_stdout(buffer),
+        ):
+            self._build_role_detail_list()
+        self.assertEqual(buffer.getvalue(), "")
+        self.assertTrue(any("2 AWS service-linked roles" in message for message in captured.output))
+
+    def test_cli_mode_prints_summary_once(self):
+        set_exclusion_output(True)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self._build_role_detail_list()
+        output = buffer.getvalue()
+        self.assertIn("2 AWS service-linked roles", output)
+        self.assertEqual(output.count("AWS service-linked role"), 1)
