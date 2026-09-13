@@ -12,6 +12,8 @@ cloudsplaining create-exclusions-file
 
 This will generate a file in your current directory titled `exclusions.yml`.
 
+> **Note:** AWS service-linked roles (those under the `/aws-service-role/` path, named `AWSServiceRoleFor...`) are always excluded, regardless of the exclusions file. AWS owns their permissions and trust policies, so nothing about them is evaluated. They still appear in the report and in the results JSON with `is_excluded: true`, so the role total matches your account, and the scan prints a one-line summary of how many were excluded.
+
 Now when you run the `scan` command, you can use the exclusions file like this:
 
 ```bash

@@ -18,6 +18,7 @@ from cloudsplaining.shared.exclusions import (
     DEFAULT_EXCLUSIONS,
     Exclusions,
     is_name_excluded,
+    report_exclusion,
 )
 from cloudsplaining.shared.utils import (
     get_full_policy_path,
@@ -62,27 +63,29 @@ class RoleDetailList:
             "roles": {},
         }
 
+        # AWS service-linked roles (path /aws-service-role/) are kept in the list so the role total matches
+        # the account, but RoleDetail marks them excluded and evaluates none of their policies: AWS owns
+        # their permissions and trust policy, so findings on them would not be actionable.
         for role_detail in role_details:
-            this_role_name = role_detail.get("RoleName")
-            this_role_path = role_detail["Path"]
-            if is_name_excluded(this_role_path, "/aws-service-role*"):
-                logger.debug(
-                    "%s role is excluded because it is an immutable AWS Service role with a path of %s",
-                    this_role_name,
-                    this_role_path,
+            self.roles.append(
+                RoleDetail(
+                    role_detail,
+                    policy_details,
+                    exclusions=exclusions,
+                    flag_conditional_statements=self.flag_conditional_statements,
+                    flag_resource_arn_statements=self.flag_resource_arn_statements,
+                    flag_trust_policies=flag_trust_policies,
+                    severity=self.severity,
                 )
-            else:
-                self.roles.append(
-                    RoleDetail(
-                        role_detail,
-                        policy_details,
-                        exclusions=exclusions,
-                        flag_conditional_statements=self.flag_conditional_statements,
-                        flag_resource_arn_statements=self.flag_resource_arn_statements,
-                        flag_trust_policies=flag_trust_policies,
-                        severity=self.severity,
-                    )
-                )
+            )
+
+        service_linked_count = len(self.service_linked_role_names)
+        if service_linked_count:
+            plural = "s" if service_linked_count != 1 else ""
+            report_exclusion(
+                f"\tExcluded {service_linked_count} AWS service-linked role{plural} under /aws-service-role/: "
+                "kept in the results with is_excluded=true; their policies are not evaluated"
+            )
 
     def set_iam_data(self, iam_data: dict[str, dict[Any, Any]]) -> None:
         self.iam_data = iam_data
@@ -107,6 +110,12 @@ class RoleDetailList:
     def role_names(self) -> list[str]:
         """Get a list of all role names in the account"""
         return sorted(role_detail.role_name for role_detail in self.roles)
+
+    @property
+    def service_linked_role_names(self) -> list[str]:
+        """Names of the AWS service-linked roles (path /aws-service-role/). They stay in the results but are
+        always excluded from evaluation."""
+        return sorted(role_detail.role_name for role_detail in self.roles if role_detail.is_service_linked)
 
     @property
     def all_infrastructure_modification_actions_by_inline_policies(self) -> list[str]:
@@ -247,6 +256,12 @@ class RoleDetail:
         )
 
     @property
+    def is_service_linked(self) -> bool:
+        """True for AWS service-linked roles (path /aws-service-role/). AWS owns their permissions and trust
+        policy, so they are always excluded from evaluation regardless of the exclusions config."""
+        return self.path.lower().startswith("/aws-service-role")
+
+    @property
     def all_allowed_actions(self) -> list[str]:
         """Return a list of which actions are allowed by the principal"""
         actions = set()
@@ -346,14 +361,16 @@ class RoleDetail:
 
         if self.flag_trust_policies:
             severities = {x.lower() for x in self.severity}
+            # A service-linked role's trust policy is fixed by AWS, so it is never flagged.
+            trust_policy = None if self.is_service_linked else self.assume_role_policy_document
             this_role_detail.update(
                 {
                     "AssumableByComputeServices": {
                         "severity": ISSUE_SEVERITY["AssumableByComputeService"],
                         "description": RISK_DEFINITION["AssumableByComputeService"],
                         "findings": (
-                            self.assume_role_policy_document.role_assumable_by_compute_services
-                            if self.assume_role_policy_document
+                            trust_policy.role_assumable_by_compute_services
+                            if trust_policy
                             and (ISSUE_SEVERITY["AssumableByComputeService"] in severities or not self.severity)
                             else []
                         ),
@@ -362,8 +379,8 @@ class RoleDetail:
                         "severity": ISSUE_SEVERITY["AssumableByCrossAccountPrincipal"],
                         "description": RISK_DEFINITION["AssumableByCrossAccountPrincipal"],
                         "findings": (
-                            self.assume_role_policy_document.role_assumable_by_cross_account_principals
-                            if self.assume_role_policy_document
+                            trust_policy.role_assumable_by_cross_account_principals
+                            if trust_policy
                             and (ISSUE_SEVERITY["AssumableByCrossAccountPrincipal"] in severities or not self.severity)
                             else []
                         ),
@@ -372,8 +389,8 @@ class RoleDetail:
                         "severity": ISSUE_SEVERITY["AssumableByAnyPrincipal"],
                         "description": RISK_DEFINITION["AssumableByAnyPrincipal"],
                         "findings": (
-                            self.assume_role_policy_document.role_assumable_by_any_principal
-                            if self.assume_role_policy_document
+                            trust_policy.role_assumable_by_any_principal
+                            if trust_policy
                             and (ISSUE_SEVERITY["AssumableByAnyPrincipal"] in severities or not self.severity)
                             else []
                         ),
@@ -382,8 +399,8 @@ class RoleDetail:
                         "severity": ISSUE_SEVERITY["AssumableByAnyPrincipalWithConditions"],
                         "description": RISK_DEFINITION["AssumableByAnyPrincipalWithConditions"],
                         "findings": (
-                            self.assume_role_policy_document.role_assumable_by_any_principal_with_conditions
-                            if self.assume_role_policy_document
+                            trust_policy.role_assumable_by_any_principal_with_conditions
+                            if trust_policy
                             and (
                                 ISSUE_SEVERITY["AssumableByAnyPrincipalWithConditions"] in severities
                                 or not self.severity

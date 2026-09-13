@@ -33,8 +33,11 @@ def set_exclusion_output(enabled: bool) -> bool:
     return previous
 
 
-def _report_exclusion(message: str) -> None:
-    """Emit an exclusion-match message: print to stdout (CLI) or logger.debug (library)."""
+def report_exclusion(message: str) -> None:
+    """Emit an exclusion message: print to stdout (CLI) or logger.debug (library).
+
+    Used for the per-match "Excluded prefix/suffix" lines here and for summaries emitted by the scan
+    modules (for example the count of AWS service-linked roles set aside by RoleDetailList)."""
     if _print_exclusion_matches.get():
         utils.print_grey(message)
     else:
@@ -180,12 +183,12 @@ def is_name_excluded(name: str, exclusions_list: str | list[str]) -> bool:
             prefix = exclusion[:-1]
             # print(prefix)
             if name.lower().startswith(prefix.lower()):
-                _report_exclusion(f"\tExcluded prefix: {exclusion}")
+                report_exclusion(f"\tExcluded prefix: {exclusion}")
                 return True
         if exclusion.startswith("*"):
             suffix = exclusion[1:]
             if name.lower().endswith(suffix.lower()):
-                _report_exclusion(f"\tExcluded suffix: {exclusion}")
+                report_exclusion(f"\tExcluded suffix: {exclusion}")
                 return True
     return False
 
