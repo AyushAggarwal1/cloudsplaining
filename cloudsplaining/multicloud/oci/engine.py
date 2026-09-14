@@ -4,11 +4,16 @@ Snapshot schema (all keys optional; parsed JSON)::
 
     {
       "users":            [ {"id": ..., "name": ...} ],
-      "groups":           [ {"id": ..., "name": ...} ],
-      "dynamicGroups":    [ {"id": ..., "name": ...} ],   # workload identities -> roles
+      "groups":           [ {"id": ..., "name": ..., "domain": ...} ],
+      "dynamicGroups":    [ {"id": ..., "name": ..., "domain": ...} ],   # workload identities -> roles
       "policies":         [ {"name": ..., "statements": [...], "compartmentId": ...} ],
       "groupMemberships": { "<groupName>": ["<userName>", ...] }
     }
+
+Groups and dynamic groups are named ``<domain>/<name>`` (``Default/Admins``);
+``domain`` defaults to the Default identity domain when absent. Policy subjects
+written as ``Admins``, ``Default/Admins``, ``'Default'/'Admins'`` or
+``id <ocid>`` all resolve to that one principal.
 
 Backward compatibility: a bare list of statement strings, a list of policy
 objects, or ``{"statements": [...]}`` / ``{"policies": [...]}`` all work, with
@@ -34,7 +39,7 @@ from cloudsplaining.multicloud.model import (
     Policy,
     Principal,
 )
-from cloudsplaining.multicloud.oci.parser import ParsedStatement, parse_statement
+from cloudsplaining.multicloud.oci.parser import ParsedStatement, parse_statement, qualified_name
 from cloudsplaining.multicloud.provider import Provider
 
 
@@ -73,9 +78,11 @@ class OciProvider(Provider):
             model.add_principal(Principal(id=uid, name=name, kind=USER, metadata=self._meta(user)))
         for group in snapshot.get("groups", []) or []:
             gid, name = self._id_name(group)
+            name = qualified_name(name, _get(group, "domain"))
             model.add_principal(Principal(id=gid, name=name, kind=GROUP, metadata=self._meta(group)))
         for dgroup in snapshot.get("dynamicGroups", []) or []:
             did, name = self._id_name(dgroup)
+            name = qualified_name(name, _get(dgroup, "domain"))
             model.add_principal(
                 Principal(id=did, name=name, kind=ROLE, metadata={"matchingRule": _get(dgroup, "matching-rule")})
             )
@@ -127,15 +134,20 @@ class OciProvider(Provider):
 
     def _attach_subjects(self, parsed: list[ParsedStatement], policy: Policy, model: AccountModel) -> None:
         for stmt in parsed:
-            if stmt.subject_type == "any-user":
-                continue
-            name = stmt.subject.strip()
-            if not name:
-                continue
+            ref = stmt.subject_ref
             kind = ROLE if stmt.subject_type == "dynamic-group" else GROUP
-            principal = self._find_by_name(model, kind, name)
-            if principal is None:
-                principal = model.add_principal(Principal(id=f"{stmt.subject_type}:{name}", name=name, kind=kind))
+            if ref.id is not None:
+                principal = model.get_principal(kind, ref.id)
+                if principal is None:
+                    principal = model.add_principal(Principal(id=ref.id, name=ref.id, kind=kind))
+            elif ref.name is not None:
+                principal = self._find_by_name(model, kind, ref.name)
+                if principal is None:
+                    principal = model.add_principal(
+                        Principal(id=f"{stmt.subject_type}:{ref.name}", name=ref.name, kind=kind)
+                    )
+            else:  # any-user: no principal to attach to
+                continue
             model.attach(principal, policy)
 
     # ----------------------------------------------------------------- helpers
@@ -155,9 +167,11 @@ class OciProvider(Provider):
 
     @staticmethod
     def _find_by_name(model: AccountModel, kind: str, name: str) -> Principal | None:
+        """Case-insensitive lookup; group / dynamic-group names accept any of the ``qualified_name`` forms."""
         bucket = {USER: model.users, GROUP: model.groups, ROLE: model.roles}[kind]
+        wanted = qualified_name(name) if kind in (GROUP, ROLE) else name
         for principal in bucket.values():
-            if principal.name.lower() == name.lower():
+            if principal.name.lower() == wanted.lower():
                 return principal
         return None
 

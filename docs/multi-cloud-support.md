@@ -168,4 +168,10 @@ cloudsplaining scan-cloud -p oci \
   --output-file oci-report.json
 ```
 
+**Group naming:** groups and dynamic groups are reported as `<domain>/<name>` (for example
+`Default/Administrators`). A policy subject written as `Administrators`, `Default/Administrators`,
+`'Default'/'Administrators'` or `group id <ocid>` resolves to that same entry, so a group never
+appears twice. Snapshot group objects may carry an optional `domain` field; without it the group is
+assumed to live in the Default identity domain.
+
 ---
