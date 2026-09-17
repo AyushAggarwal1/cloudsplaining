@@ -1,0 +1,49 @@
+{
+  "customRoles": [
+    {
+      "name": "projects/acme-prod/roles/deployBot",
+      "title": "Deploy Bot",
+      "stage": "GA",
+      "includedPermissions": [
+        "resourcemanager.projects.setIamPolicy",
+        "iam.serviceAccounts.actAs",
+        "iam.serviceAccountKeys.create",
+        "storage.objects.get",
+        "storage.objects.list",
+        "compute.firewalls.create"
+      ]
+    },
+    {
+      "name": "projects/acme-prod/roles/dataReader",
+      "title": "Data Reader",
+      "stage": "GA",
+      "includedPermissions": [
+        "bigquery.tables.getData",
+        "bigquery.tables.export",
+        "storage.objects.get"
+      ]
+    }
+  ],
+  "bindings": [
+    {
+      "role": "roles/owner",
+      "members": ["user:root@acme.com", "serviceAccount:terraform@acme-prod.iam.gserviceaccount.com"],
+      "resource": "projects/acme-prod"
+    },
+    {
+      "role": "roles/storage.objectViewer",
+      "members": ["allUsers"],
+      "resource": "projects/acme-prod/buckets/public-assets"
+    },
+    {
+      "role": "roles/iam.serviceAccountTokenCreator",
+      "members": ["group:devs@acme.com"],
+      "resource": "projects/acme-prod"
+    },
+    {
+      "role": "roles/editor",
+      "members": ["serviceAccount:ci@acme-prod.iam.gserviceaccount.com"],
+      "resource": "projects/acme-prod"
+    }
+  ]
+}
