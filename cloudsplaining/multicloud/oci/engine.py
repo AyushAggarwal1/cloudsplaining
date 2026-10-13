@@ -39,7 +39,7 @@ from cloudsplaining.multicloud.model import (
     Policy,
     Principal,
 )
-from cloudsplaining.multicloud.oci.parser import ParsedStatement, parse_statement, qualified_name
+from cloudsplaining.multicloud.oci.parser import DEFAULT_DOMAIN, ParsedStatement, parse_statement, qualified_name
 from cloudsplaining.multicloud.provider import Provider
 
 
@@ -90,9 +90,12 @@ class OciProvider(Provider):
     def _add_memberships(self, snapshot: dict[str, Any], model: AccountModel) -> None:
         for group_name, members in (snapshot.get("groupMemberships", {}) or {}).items():
             group = self._find_by_name(model, GROUP, group_name)
+            if group is None:
+                continue
+            domain = group.name.partition("/")[0]
             for member in members:
-                user = self._find_by_name(model, USER, member)
-                if user is not None and group is not None and group.name not in user.groups:
+                user = self._find_user(model, member, domain)
+                if user is not None and group.name not in user.groups:
                     user.groups.append(group.name)
 
     # --------------------------------------------------------------- policies
@@ -163,7 +166,25 @@ class OciProvider(Provider):
     def _meta(obj: Any) -> dict[str, Any]:
         if not isinstance(obj, dict):
             return {}
-        return {"description": obj.get("description"), "compartmentId": obj.get("compartmentId")}
+        return {
+            "description": obj.get("description"),
+            "compartmentId": obj.get("compartmentId"),
+            "domain": obj.get("domain"),
+        }
+
+    @staticmethod
+    def _find_user(model: AccountModel, name: str, domain: str) -> Principal | None:
+        """Case-insensitive lookup of a group member.
+
+        A domain group only contains users of that domain, so a user recorded
+        in ``domain`` wins; a user with no recorded domain (older snapshots) is
+        the fallback. A user recorded in a *different* domain never matches.
+        """
+        matches = [u for u in model.users.values() if u.name.lower() == name.lower()]
+        for user in matches:
+            if str(user.metadata.get("domain") or DEFAULT_DOMAIN).lower() == domain.lower():
+                return user
+        return next((u for u in matches if not u.metadata.get("domain")), None)
 
     @staticmethod
     def _find_by_name(model: AccountModel, kind: str, name: str) -> Principal | None:
