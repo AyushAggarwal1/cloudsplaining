@@ -12,6 +12,7 @@ from typing import Any
 
 from policy_sentry.querying.actions import get_all_action_links
 from policy_sentry.querying.all import get_all_service_prefixes
+from policy_sentry.util.arns import get_account_from_arn
 
 from cloudsplaining.scan.group_details import GroupDetailList
 from cloudsplaining.scan.managed_policy_detail import ManagedPolicyDetails
@@ -21,6 +22,16 @@ from cloudsplaining.shared.exclusions import DEFAULT_EXCLUSIONS, Exclusions
 
 all_service_prefixes = get_all_service_prefixes()
 logger = logging.getLogger(__name__)
+
+
+def _derive_account_id(*principal_collections: dict[str, Any]) -> str:
+    """Best-effort account id from the first customer principal ARN, in collection order."""
+    for collection in principal_collections:
+        for entry in collection.values():
+            arn = entry.get("arn") or ""
+            if arn and "arn:aws:iam::aws:" not in arn:
+                return str(get_account_from_arn(arn))
+    return ""
 
 
 # pylint: disable=too-many-instance-attributes
@@ -136,12 +147,16 @@ class AuthorizationDetails:
         return results
 
     @property
-    def results(self) -> dict[str, dict[str, Any]]:
+    def results(self) -> dict[str, Any]:
         """Get the new JSON format of the Principals data"""
-        results: dict[str, dict[str, Any]] = {
-            "groups": self.group_detail_list.json,
-            "users": self.user_detail_list.json,
-            "roles": self.role_detail_list.json,
+        groups = self.group_detail_list.json
+        users = self.user_detail_list.json
+        roles = self.role_detail_list.json
+        results: dict[str, Any] = {
+            "account_id": _derive_account_id(roles, users, groups),
+            "groups": groups,
+            "users": users,
+            "roles": roles,
             "aws_managed_policies": self.policies.json_large_aws_managed,
             "customer_managed_policies": self.policies.json_large_customer_managed,
             "inline_policies": self.inline_policies,
