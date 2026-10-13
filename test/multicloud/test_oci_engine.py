@@ -193,3 +193,30 @@ class TestOciEngine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOciEngineIdentityDomains(unittest.TestCase):
+    def test_group_members_resolve_to_the_user_in_the_group_domain(self):
+        snapshot = {
+            "users": [
+                {"id": "ocid.user.default-ops", "name": "ops@corp.com"},
+                {"id": "ocid.user.prod-ops", "name": "ops@corp.com", "domain": "prod-domain"},
+            ],
+            "groups": [{"id": "ocid.group.ops", "name": "Ops", "domain": "prod-domain"}],
+            "groupMemberships": {"prod-domain/Ops": ["ops@corp.com"]},
+            "policies": [],
+        }
+        model = OciProvider().scan(snapshot)
+        self.assertEqual(model.users["ocid.user.prod-ops"].groups, ["prod-domain/Ops"])
+        self.assertEqual(model.users["ocid.user.default-ops"].groups, [])
+        self.assertEqual(model.users["ocid.user.prod-ops"].metadata.get("domain"), "prod-domain")
+
+    def test_members_without_a_domain_still_resolve_by_name(self):
+        snapshot = {
+            "users": [{"id": "ocid.user.alice", "name": "alice"}],
+            "groups": [{"id": "ocid.group.admins", "name": "Administrators"}],
+            "groupMemberships": {"Administrators": ["alice"]},
+            "policies": [],
+        }
+        model = OciProvider().scan(snapshot)
+        self.assertEqual(model.users["ocid.user.alice"].groups, ["Default/Administrators"])

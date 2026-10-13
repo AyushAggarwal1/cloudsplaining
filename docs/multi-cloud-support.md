@@ -159,6 +159,46 @@ cloudsplaining collect-cloud -p oci \
   -o oci-snapshot.json
 ```
 
+To scope the snapshot to one compartment instead of the whole tenancy, add `--compartment-id`:
+
+```bash
+cloudsplaining collect-cloud -p oci \
+  --config-file 'path' \
+  --tenancy-id <tenancy-id> \
+  --compartment-id <compartment-ocid> \
+  -o oci-snapshot.json
+```
+
+With a compartment set, the snapshot contains:
+
+- the policies attached in that compartment and every compartment below it;
+- every identity domain located in those compartments, with all of its users, groups, and dynamic
+  groups;
+- from the tenancy root (the Default identity domain plus any secondary domains in the root
+  compartment), only the groups and dynamic groups those policies reference, and the members of
+  those groups.
+
+Policies attached at the tenancy root (or in a parent compartment) are not included even when
+their statements name the compartment. The root is read best-effort in this mode: if the
+credential cannot list tenancy-level identities, a warning is logged and the snapshot keeps the
+compartment's own identity domains. The snapshot records the scope as `compartment_id` next to
+`account_id`.
+
+Without `--compartment-id`, policies and identity domains are collected from the tenancy and its
+whole compartment tree.
+
+**Identity domains:** the Default domain's identities come from the legacy Identity API; every
+other domain is read through the Identity Domains API, which needs
+`Allow group <auditors> to read domains in tenancy` (the `inspect all-resources` grant above does
+not cover domain users and groups). Identities from a non-Default domain carry a `domain` field
+and are reported as `<domain>/<name>`. A policy subject written without a domain
+(`Allow group Admins to ...`) refers to the Default domain, as in OCI itself; use
+`group '<domain>'/'<group>'` to reference a group in another domain. The built-in
+`All Domain Users` group has implicit membership, so it is reported with no members. Creation
+audit events for a domain's users and dynamic groups are logged in the compartment the domain
+lives in, and the collector queries them there; `read audit-events in tenancy` covers every
+compartment.
+
 **Step 4 — Scan:**
 
 ```bash

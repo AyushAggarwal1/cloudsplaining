@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 )
 @click.option("--project-id", help="[gcp] GCP project ID to collect IAM data from.")
 @click.option("--tenancy-id", help="[oci] OCI tenancy OCID (defaults to the config file's tenancy).")
+@click.option(
+    "--compartment-id",
+    help="[oci] Scope collection to this compartment OCID and its sub-compartments (defaults to the whole tenancy).",
+)
 @click.option("--config-file", help="[oci] Path to OCI config file (defaults to ~/.oci/config).")
 @click.option("--config-profile", default="DEFAULT", help="[oci] OCI config profile name.")
 @click.option(
@@ -59,6 +63,7 @@ def collect_cloud(
     subscription_id: str | None,
     project_id: str | None,
     tenancy_id: str | None,
+    compartment_id: str | None,
     config_file: str | None,
     config_profile: str,
     output_file: str | None,
@@ -71,6 +76,7 @@ def collect_cloud(
         "subscription_id": subscription_id,
         "project_id": project_id,
         "tenancy_id": tenancy_id,
+        "compartment_id": compartment_id,
         "config_file": config_file,
         "config_profile": config_profile,
     }

@@ -80,6 +80,9 @@ class _FakeIdentityClient:
     def list_user_group_memberships(self, compartment_id, group_id, page=None):
         return self._Resp([self._membership])
 
+    def list_domains(self, compartment_id, page=None):
+        return self._Resp(getattr(self, "domains", []))
+
 
 def _audit_event(event_type, resource_name, principal_name):
     identity = type("I", (), {"principal_name": principal_name})()
@@ -110,6 +113,8 @@ class _FakeAuditClient:
     def __init__(self, error=None):
         self.error = error
         self.windows = []
+        #: (compartment_id, start_time, end_time) per call: which compartment each window was queried in.
+        self.calls = []
 
     def list_events(self, compartment_id, start_time, end_time, page=None):
         if self.error is not None:
@@ -119,6 +124,7 @@ class _FakeAuditClient:
         if start_time < datetime.now(timezone.utc) - timedelta(days=365):
             raise RuntimeError("startTime can not be older than 365 days")
         self.windows.append((start_time, end_time))
+        self.calls.append((compartment_id, start_time, end_time))
         return self._Resp(
             [
                 _audit_event("com.oraclecloud.identityControlPlane.CreateUser", "alice", "admin@corp.com"),
@@ -237,13 +243,22 @@ class _FakeIdentityDomainsClient:
         return self._Resp(type("Users", (), {"resources": [user] if start_index == 1 else []})())
 
 
+_DEFAULT_DOMAIN_URL = "https://default.identity.example"
+
+
+def _default_domain_identity_client():
+    identity = _FakeIdentityClient()
+    identity.domains = [_domain("Default", "DEFAULT", "ocid.tenancy", _DEFAULT_DOMAIN_URL)]
+    return identity
+
+
 class TestOciIdentityDomains(unittest.TestCase):
     def _collector(self, domains_client):
         return get_collector(
             "oci",
             tenancy_id="ocid.tenancy",
-            client=_FakeIdentityClient(),
-            identity_domains_clients=[domains_client],
+            client=_default_domain_identity_client(),
+            identity_domains_clients={_DEFAULT_DOMAIN_URL: domains_client},
         )
 
     def test_identity_domains_created_by_merged_into_users(self):
@@ -258,13 +273,13 @@ class TestOciIdentityDomains(unittest.TestCase):
 
         # idcsCreatedBy is stored on the user, so it attributes identities whose
         # creation events left the 365-day audit window long ago.
-        identity = _FakeIdentityClient()
+        identity = _default_domain_identity_client()
         identity._user.time_created = _OCI_NOW - timedelta(days=900)
         collector = get_collector(
             "oci",
             tenancy_id="ocid.tenancy",
             client=identity,
-            identity_domains_clients=[_FakeIdentityDomainsClient()],
+            identity_domains_clients={_DEFAULT_DOMAIN_URL: _FakeIdentityDomainsClient()},
         )
         records = {record.name: record for record in build_inventory(collector.collect())}
         self.assertEqual(records["alice"].created_by, "domain-admin@corp.com")
@@ -752,3 +767,452 @@ class TestAzureGraphCollection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _obj(**attrs):
+    return type("O", (), attrs)()
+
+
+def _domain(display_name, kind, compartment_id, url):
+    return _obj(
+        id=f"ocid.domain.{display_name}", display_name=display_name, type=kind, compartment_id=compartment_id, url=url
+    )
+
+
+def _iso(moment):
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+_PROD_USER_CREATED = (_OCI_NOW - timedelta(days=60)).replace(microsecond=0)
+_PROD_LAST_LOGIN = (_OCI_NOW - timedelta(days=3)).replace(microsecond=0)
+_PROD_DG_CREATED = (_OCI_NOW - timedelta(days=45)).replace(microsecond=0)
+_D2_USER_CREATED = (_OCI_NOW - timedelta(days=90)).replace(microsecond=0)
+
+_D2_URL = "https://d2.identity.example"
+_PROD_URL = "https://prod.identity.example"
+
+
+def _scim_user(ocid, name, created_by, *, login=None, mfa=None, console=True, api_keys=False, created=None):
+    """A SCIM user the way oci.identity_domains returns it (extension attributes as SDK attributes)."""
+    return _obj(
+        id=f"scim-{name}",
+        ocid=ocid,
+        user_name=name,
+        description=None,
+        emails=[_obj(value=f"{name}@corp.com", primary=True)],
+        meta=_obj(created=_iso(created or _PROD_USER_CREATED)),
+        idcs_created_by=_obj(display=f"{created_by}@corp.com", value=f"ocid.user.{created_by}"),
+        urn_ietf_params_scim_schemas_oracle_idcs_extension_user_state_user=(
+            _obj(last_successful_login_date=_iso(login)) if login else None
+        ),
+        urn_ietf_params_scim_schemas_oracle_idcs_extension_mfa_user=_obj(mfa_status=mfa) if mfa else None,
+        urn_ietf_params_scim_schemas_oracle_idcs_extension_capabilities_user=_obj(
+            can_use_console_password=console, can_use_api_keys=api_keys
+        ),
+    )
+
+
+def _scim_group(ocid, name, *members):
+    return _obj(
+        id=f"scim-{name}",
+        ocid=ocid,
+        display_name=name,
+        description=None,
+        members=[_obj(name=m, ocid=f"ocid.user.{m}", value=f"scim-{m}") for m in members] or None,
+    )
+
+
+def _scim_dynamic_group(ocid, name, rule):
+    return _obj(
+        id=f"scim-{name}",
+        ocid=ocid,
+        display_name=name,
+        description=None,
+        matching_rule=rule,
+        meta=_obj(created=_iso(_PROD_DG_CREATED)),
+    )
+
+
+class _FakeScimClient:
+    """Stand-in for oci.identity_domains.IdentityDomainsClient for one identity domain."""
+
+    class _Resp:
+        def __init__(self, data):
+            self.data = data
+
+    def __init__(self, users=(), groups=(), dynamic_groups=(), error=None):
+        self.users, self.groups, self.dynamic_groups, self.error = (
+            list(users),
+            list(groups),
+            list(dynamic_groups),
+            error,
+        )
+
+    def _page(self, items, start_index):
+        if self.error is not None:
+            raise self.error
+        return self._Resp(_obj(resources=items if (start_index or 1) == 1 else []))
+
+    def list_users(self, attributes=None, count=None, start_index=None):
+        return self._page(self.users, start_index)
+
+    def list_groups(self, attributes=None, count=None, start_index=None):
+        return self._page(self.groups, start_index)
+
+    def list_dynamic_resource_groups(self, attributes=None, count=None, start_index=None):
+        return self._page(self.dynamic_groups, start_index)
+
+
+class _FakeNestedIdentityClient:
+    """Tenancy with nested compartments and identity domains; records the compartment each call was given.
+
+    tenancy                 Default domain (legacy API): alice/Administrators, bob/ProdOps, carol/DevOps
+                            domain-2 (SECONDARY): dave/Ops, erin/Unused
+    ├── prod                prod-domain (SECONDARY): frank/Domain_Administrators, grace/Readers, All Domain Users
+    │   └── prod/app
+    └── dev
+    """
+
+    class _Resp:
+        def __init__(self, data):
+            self.data = data
+            self.next_page = None
+
+    def __init__(self, root_error=None):
+        self.calls = []
+        self.root_error = root_error
+        self.children = {
+            "ocid.tenancy": [_obj(id="ocid.cmp.prod"), _obj(id="ocid.cmp.dev")],
+            "ocid.cmp.prod": [_obj(id="ocid.cmp.app")],
+            "ocid.cmp.app": [],
+            "ocid.cmp.dev": [],
+        }
+        self.policies = {
+            "ocid.tenancy": [
+                _obj(
+                    id="ocid.policy.root",
+                    name="root",
+                    compartment_id="ocid.tenancy",
+                    statements=["Allow group Administrators to manage all-resources in tenancy"],
+                )
+            ],
+            "ocid.cmp.prod": [
+                _obj(
+                    id="ocid.policy.prod",
+                    name="prod",
+                    compartment_id="ocid.cmp.prod",
+                    statements=[
+                        "Allow group 'Default'/'ProdOps' to manage instances in compartment prod",
+                        "Allow group 'domain-2'/'Ops' to read instances in compartment prod",
+                    ],
+                )
+            ],
+            "ocid.cmp.app": [
+                _obj(
+                    id="ocid.policy.app",
+                    name="app",
+                    compartment_id="ocid.cmp.app",
+                    statements=["Allow dynamic-group id ocid.dynamicgroup.dg to read objects in compartment prod:app"],
+                )
+            ],
+            "ocid.cmp.dev": [
+                _obj(
+                    id="ocid.policy.dev",
+                    name="dev",
+                    compartment_id="ocid.cmp.dev",
+                    statements=["Allow group DevOps to manage all-resources in compartment dev"],
+                )
+            ],
+        }
+        self.users = [
+            _obj(id="ocid.user.alice", name="alice", time_created=_OCI_USER_CREATED),
+            _obj(id="ocid.user.bob", name="bob", time_created=_OCI_USER_CREATED),
+            _obj(id="ocid.user.carol", name="carol", time_created=_OCI_USER_CREATED),
+        ]
+        self.groups = [
+            _obj(id="ocid.group.admins", name="Administrators"),
+            _obj(id="ocid.group.prodops", name="ProdOps"),
+            _obj(id="ocid.group.devops", name="DevOps"),
+        ]
+        self.dynamic_groups = [
+            _obj(id="ocid.dynamicgroup.dg", name="instances-dg", matching_rule="x", time_created=_OCI_DG_CREATED),
+            _obj(id="ocid.dynamicgroup.other", name="other-dg", matching_rule="y", time_created=_OCI_DG_CREATED),
+        ]
+        self.memberships = {
+            "ocid.group.admins": [_obj(user_id="ocid.user.alice")],
+            "ocid.group.prodops": [_obj(user_id="ocid.user.bob")],
+            "ocid.group.devops": [_obj(user_id="ocid.user.carol")],
+        }
+        self.domains = {
+            "ocid.tenancy": [
+                _domain("Default", "DEFAULT", "ocid.tenancy", _DEFAULT_DOMAIN_URL),
+                _domain("domain-2", "SECONDARY", "ocid.tenancy", _D2_URL),
+            ],
+            "ocid.cmp.prod": [_domain("prod-domain", "SECONDARY", "ocid.cmp.prod", _PROD_URL)],
+            "ocid.cmp.app": [],
+            "ocid.cmp.dev": [],
+        }
+        self.domain_clients = {
+            # The Default domain mirrors the legacy listing (same OCIDs) and only adds idcsCreatedBy.
+            _DEFAULT_DOMAIN_URL: _FakeScimClient(
+                users=[_scim_user(u.id, u.name, "domain-admin") for u in self.users],
+                groups=[_scim_group(g.id, g.name) for g in self.groups],
+            ),
+            _D2_URL: _FakeScimClient(
+                users=[
+                    _scim_user("ocid.user.dave", "dave", "d2-admin", created=_D2_USER_CREATED),
+                    _scim_user("ocid.user.erin", "erin", "d2-admin", created=_D2_USER_CREATED),
+                ],
+                groups=[
+                    _scim_group("ocid.group.d2ops", "Ops", "dave"),
+                    _scim_group("ocid.group.d2unused", "Unused", "erin"),
+                ],
+            ),
+            _PROD_URL: _FakeScimClient(
+                users=[
+                    _scim_user("ocid.user.frank", "frank", "prod-admin", login=_PROD_LAST_LOGIN, mfa="ENROLLED"),
+                    _scim_user("ocid.user.grace", "grace", "prod-admin", console=False, api_keys=True),
+                ],
+                groups=[
+                    _scim_group("ocid.group.proddomainadmins", "Domain_Administrators", "frank"),
+                    _scim_group("ocid.group.prodall", "All Domain Users"),
+                    _scim_group("ocid.group.prodreaders", "Readers", "grace"),
+                ],
+                dynamic_groups=[
+                    _scim_dynamic_group(
+                        "ocid.dynamicgroup.prodinst", "prod-instances", "instance.compartment.id = 'prod'"
+                    )
+                ],
+            ),
+        }
+
+    def _root(self, call, compartment_id):
+        self.calls.append((call, compartment_id))
+        if self.root_error is not None and compartment_id == "ocid.tenancy":
+            raise self.root_error
+
+    def list_users(self, compartment_id, page=None):
+        self._root("list_users", compartment_id)
+        return self._Resp(self.users)
+
+    def list_groups(self, compartment_id, page=None):
+        self._root("list_groups", compartment_id)
+        return self._Resp(self.groups)
+
+    def list_dynamic_groups(self, compartment_id, page=None):
+        self._root("list_dynamic_groups", compartment_id)
+        return self._Resp(self.dynamic_groups)
+
+    def list_compartments(self, compartment_id, page=None):
+        self._root("list_compartments", compartment_id)
+        return self._Resp(self.children[compartment_id])
+
+    def list_policies(self, compartment_id, page=None):
+        self._root("list_policies", compartment_id)
+        return self._Resp(self.policies[compartment_id])
+
+    def list_domains(self, compartment_id, page=None):
+        self._root("list_domains", compartment_id)
+        return self._Resp(self.domains[compartment_id])
+
+    def list_user_group_memberships(self, compartment_id, group_id, page=None):
+        self._root("list_user_group_memberships", compartment_id)
+        self.calls[-1] = ("list_user_group_memberships", group_id)
+        return self._Resp(self.memberships[group_id])
+
+
+def _qualified(group):
+    return f"{group.get('domain') or 'Default'}/{group['name']}"
+
+
+class TestOciCompartmentScope(unittest.TestCase):
+    def _collect(self, **options):
+        client = _FakeNestedIdentityClient(root_error=options.pop("root_error", None))
+        collector = get_collector(
+            "oci", tenancy_id="ocid.tenancy", client=client, identity_domains_clients=client.domain_clients, **options
+        )
+        return collector.collect(), client
+
+    # ------------------------------------------------------------ policies
+    def test_tenancy_scope_walks_nested_compartments_for_policies(self):
+        snapshot, _ = self._collect()
+        self.assertEqual({p["name"] for p in snapshot["policies"]}, {"root", "prod", "app", "dev"})
+
+    def test_compartment_scope_collects_policies_from_its_subtree_only(self):
+        snapshot, client = self._collect(compartment_id="ocid.cmp.prod")
+        self.assertEqual({p["name"] for p in snapshot["policies"]}, {"prod", "app"})
+        listed = [cid for call, cid in client.calls if call == "list_policies"]
+        self.assertEqual(sorted(listed), ["ocid.cmp.app", "ocid.cmp.prod"])
+
+    def test_compartment_scope_is_recorded_alongside_tenancy(self):
+        snapshot, _ = self._collect(compartment_id="ocid.cmp.prod")
+        self.assertEqual(snapshot["account_id"], "ocid.tenancy")
+        self.assertEqual(snapshot["compartment_id"], "ocid.cmp.prod")
+
+    # ---------------------------------------------------- identity domains
+    def test_tenancy_scope_collects_identity_domains_from_every_compartment(self):
+        snapshot, client = self._collect()
+        self.assertIsNone(snapshot["compartment_id"])
+        names = sorted(u["name"] for u in snapshot["users"])
+        self.assertEqual(names, ["alice", "bob", "carol", "dave", "erin", "frank", "grace"])
+        self.assertEqual(
+            sorted(_qualified(g) for g in snapshot["groups"]),
+            [
+                "Default/Administrators",
+                "Default/DevOps",
+                "Default/ProdOps",
+                "domain-2/Ops",
+                "domain-2/Unused",
+                "prod-domain/All Domain Users",
+                "prod-domain/Domain_Administrators",
+                "prod-domain/Readers",
+            ],
+        )
+        self.assertEqual(
+            sorted(d["name"] for d in snapshot["dynamicGroups"]), ["instances-dg", "other-dg", "prod-instances"]
+        )
+        self.assertEqual(snapshot["groupMemberships"]["domain-2/Ops"], ["dave"])
+        listed = sorted(cid for call, cid in client.calls if call == "list_domains")
+        self.assertEqual(listed, ["ocid.cmp.app", "ocid.cmp.dev", "ocid.cmp.prod", "ocid.tenancy"])
+
+    def test_compartment_scope_includes_the_identity_domain_inside_the_compartment(self):
+        snapshot, _ = self._collect(compartment_id="ocid.cmp.prod")
+        self.assertEqual(
+            sorted(u["name"] for u in snapshot["users"] if u.get("domain") == "prod-domain"), ["frank", "grace"]
+        )
+        self.assertEqual(
+            [g["name"] for g in snapshot["groups"] if g.get("domain") == "prod-domain"],
+            ["Domain_Administrators", "All Domain Users", "Readers"],
+        )
+        self.assertEqual(
+            [d["name"] for d in snapshot["dynamicGroups"] if d.get("domain") == "prod-domain"], ["prod-instances"]
+        )
+        self.assertEqual(snapshot["groupMemberships"]["prod-domain/Domain_Administrators"], ["frank"])
+        self.assertEqual(snapshot["groupMemberships"]["prod-domain/All Domain Users"], [])
+        self.assertEqual(snapshot["groupMemberships"]["prod-domain/Readers"], ["grace"])
+
+    def test_compartment_scope_keeps_root_identities_only_when_a_scoped_policy_references_them(self):
+        snapshot, client = self._collect(compartment_id="ocid.cmp.prod")
+        root_users = sorted(u["name"] for u in snapshot["users"] if u.get("domain") != "prod-domain")
+        self.assertEqual(root_users, ["bob", "dave"])
+        root_groups = sorted(_qualified(g) for g in snapshot["groups"] if g.get("domain") != "prod-domain")
+        self.assertEqual(root_groups, ["Default/ProdOps", "domain-2/Ops"])
+        self.assertEqual(
+            [d["name"] for d in snapshot["dynamicGroups"] if d.get("domain") != "prod-domain"], ["instances-dg"]
+        )
+        self.assertEqual(snapshot["groupMemberships"]["ProdOps"], ["bob"])
+        self.assertEqual(snapshot["groupMemberships"]["domain-2/Ops"], ["dave"])
+        self.assertNotIn("domain-2/Unused", snapshot["groupMemberships"])
+        # Legacy memberships are only fetched for the root groups kept in scope.
+        fetched = [gid for call, gid in client.calls if call == "list_user_group_memberships"]
+        self.assertEqual(fetched, ["ocid.group.prodops"])
+
+    def test_compartment_scope_still_lists_identities_from_the_tenancy_root(self):
+        # OCI keeps users/groups/dynamic groups in the root compartment only; a
+        # child compartment OCID is rejected by those list calls.
+        _, client = self._collect(compartment_id="ocid.cmp.prod")
+        for call in ("list_users", "list_groups", "list_dynamic_groups"):
+            self.assertIn((call, "ocid.tenancy"), client.calls)
+
+    def test_default_domain_identities_come_from_the_legacy_listing_without_duplicates(self):
+        snapshot, _ = self._collect()
+        ids = [u["id"] for u in snapshot["users"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        alice = next(u for u in snapshot["users"] if u["name"] == "alice")
+        self.assertIsNone(alice.get("domain"))
+        self.assertEqual(
+            alice["idcsCreatedBy"], {"display": "domain-admin@corp.com", "value": "ocid.user.domain-admin"}
+        )
+        self.assertEqual(sum(1 for g in snapshot["groups"] if g["name"] == "Administrators"), 1)
+
+    def test_domain_user_lifecycle_fields_match_the_legacy_shape(self):
+        snapshot, _ = self._collect(compartment_id="ocid.cmp.prod")
+        frank = next(u for u in snapshot["users"] if u["name"] == "frank")
+        self.assertEqual(frank["id"], "ocid.user.frank")
+        self.assertEqual(frank["domain"], "prod-domain")
+        self.assertEqual(frank["email"], "frank@corp.com")
+        self.assertEqual(frank["timeCreated"], _PROD_USER_CREATED)
+        self.assertEqual(frank["lastSuccessfulLoginTime"], _PROD_LAST_LOGIN)
+        self.assertIs(frank["isMfaActivated"], True)
+        self.assertEqual(frank["capabilities"], {"canUseConsolePassword": True, "canUseApiKeys": False})
+        self.assertEqual(frank["idcsCreatedBy"], {"display": "prod-admin@corp.com", "value": "ocid.user.prod-admin"})
+        grace = next(u for u in snapshot["users"] if u["name"] == "grace")
+        self.assertIsNone(grace["lastSuccessfulLoginTime"])
+        self.assertIs(grace["isMfaActivated"], False)
+        prod_dg = next(d for d in snapshot["dynamicGroups"] if d["name"] == "prod-instances")
+        self.assertEqual(prod_dg["id"], "ocid.dynamicgroup.prodinst")
+        self.assertEqual(prod_dg["matching-rule"], "instance.compartment.id = 'prod'")
+        self.assertEqual(prod_dg["timeCreated"], _PROD_DG_CREATED)
+
+    def test_domain_identities_feed_the_identity_inventory(self):
+        from cloudsplaining.identity_inventory.oci import build_inventory
+
+        snapshot, _ = self._collect(compartment_id="ocid.cmp.prod")
+        records = {r.name: r for r in build_inventory(snapshot)}
+        self.assertEqual(records["frank"].classification, "human")
+        self.assertEqual(records["frank"].created_by, "prod-admin@corp.com")
+        self.assertEqual(records["grace"].classification, "machine")
+        self.assertEqual(records["prod-instances"].classification, "machine")
+
+    def test_domain_identities_round_trip_through_the_engine(self):
+        from cloudsplaining.multicloud.oci.engine import OciProvider
+
+        snapshot, _ = self._collect(compartment_id="ocid.cmp.prod")
+        model = OciProvider().scan(snapshot)
+        self.assertEqual(model.users["ocid.user.frank"].groups, ["prod-domain/Domain_Administrators"])
+        self.assertEqual(model.users["ocid.user.dave"].groups, ["domain-2/Ops"])
+        self.assertEqual(sorted(model.groups["ocid.group.d2ops"].customer_managed_policies.values()), ["prod"])
+
+    # ------------------------------------------------------------- failures
+    def test_compartment_scope_survives_an_unreadable_tenancy_root(self):
+        with self.assertLogs("cloudsplaining.multicloud.collectors.oci", level="WARNING"):
+            snapshot, _ = self._collect(
+                compartment_id="ocid.cmp.prod", root_error=RuntimeError("NotAuthorizedOrNotFound")
+            )
+        self.assertEqual(sorted(u["name"] for u in snapshot["users"]), ["frank", "grace"])
+        self.assertEqual({p["name"] for p in snapshot["policies"]}, {"prod", "app"})
+
+    def test_tenancy_scope_does_not_hide_an_unreadable_root(self):
+        with self.assertRaises(RuntimeError):
+            self._collect(root_error=RuntimeError("NotAuthorizedOrNotFound"))
+
+    def test_a_failing_identity_domain_is_skipped_not_fatal(self):
+        client = _FakeNestedIdentityClient()
+        client.domain_clients[_D2_URL] = _FakeScimClient(error=RuntimeError("boom"))
+        collector = get_collector(
+            "oci", tenancy_id="ocid.tenancy", client=client, identity_domains_clients=client.domain_clients
+        )
+        with self.assertLogs("cloudsplaining.multicloud.collectors.oci", level="WARNING"):
+            snapshot = collector.collect()
+        names = {u["name"] for u in snapshot["users"]}
+        self.assertIn("frank", names)
+        self.assertIn("alice", names)
+        self.assertNotIn("dave", names)
+
+
+class TestOciAuditCompartments(unittest.TestCase):
+    def test_audit_events_are_queried_in_the_compartment_that_hosts_each_identity(self):
+        # CreateUser / CreateDynamicGroup events for an identity domain are logged in the
+        # compartment the domain lives in, so each identity's window must be queried there.
+        audit = _FakeAuditClient()
+        client = _FakeNestedIdentityClient()
+        get_collector(
+            "oci",
+            tenancy_id="ocid.tenancy",
+            client=client,
+            identity_domains_clients=client.domain_clients,
+            audit_client=audit,
+            compartment_id="ocid.cmp.prod",
+        ).collect()
+
+        def covered(compartment_id, moment):
+            return any(c == compartment_id and s <= moment <= e for c, s, e in audit.calls)
+
+        self.assertTrue(covered("ocid.tenancy", _OCI_USER_CREATED))  # bob: Default domain, kept via ProdOps
+        self.assertTrue(covered("ocid.tenancy", _D2_USER_CREATED))  # dave: domain-2 lives in the root
+        self.assertTrue(covered("ocid.tenancy", _OCI_DG_CREATED))  # instances-dg
+        self.assertTrue(covered("ocid.cmp.prod", _PROD_USER_CREATED))  # frank, grace: prod-domain
+        self.assertTrue(covered("ocid.cmp.prod", _PROD_DG_CREATED))  # prod-instances
+        self.assertFalse(covered("ocid.tenancy", _PROD_USER_CREATED))
+        self.assertFalse(covered("ocid.cmp.prod", _OCI_USER_CREATED))
+        self.assertEqual({c for c, _, _ in audit.calls}, {"ocid.tenancy", "ocid.cmp.prod"})
