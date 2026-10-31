@@ -87,16 +87,47 @@ class InlinePolicy:
             principals = (self.iam_data[principal_type]).keys()
             for principal_id in principals:
                 inline_policies = {}
-                if self.is_excluded:
+                if self.is_excluded and not self.exclusions.keep_excluded:
                     return {}
                 inline_policies.update(self.iam_data[principal_type][principal_id]["inline_policies"])
                 if self.policy_id in inline_policies:
                     attached[principal_type].append(self.iam_data[principal_type][principal_id]["name"])
         return attached
 
+    def _json_without_findings(self, include_infrastructure_modification: bool) -> dict[str, Any]:
+        """The json/json_large shape for a kept-excluded inline policy: document and
+        attachments intact, every findings list empty."""
+        categories = [
+            "PrivilegeEscalation",
+            "DataExfiltration",
+            "ResourceExposure",
+            "ServiceWildcard",
+            "CredentialsExposure",
+        ]
+        if include_infrastructure_modification:
+            categories.append("InfrastructureModification")
+        entry: dict[str, Any] = {
+            "PolicyName": self.policy_name,
+            "PolicyId": self.policy_id,
+            "PolicyDocument": self.policy_document.json,
+            "AttachedTo": self.getAttached,
+        }
+        for category in categories:
+            entry[category] = {
+                "severity": ISSUE_SEVERITY[category],
+                "description": RISK_DEFINITION[category],
+                "findings": [],
+            }
+            if category == "PrivilegeEscalation":
+                entry[category]["links"] = {}
+        entry["is_excluded"] = self.is_excluded
+        return entry
+
     @property
     def json(self) -> dict[str, Any]:
         """Return JSON output for high risk actions"""
+        if self.is_excluded and self.exclusions.keep_excluded:
+            return self._json_without_findings(include_infrastructure_modification=False)
         return {
             "PolicyName": self.policy_name,
             "PolicyId": self.policy_id,
@@ -158,6 +189,8 @@ class InlinePolicy:
     @property
     def json_large(self) -> dict[str, Any]:
         """Return JSON output - including Infra Modification actions, which can be large"""
+        if self.is_excluded and self.exclusions.keep_excluded:
+            return self._json_without_findings(include_infrastructure_modification=True)
         return {
             "PolicyName": self.policy_name,
             "PolicyId": self.policy_id,

@@ -73,7 +73,8 @@ class ManagedPolicyDetails:
                     this_policy_id,
                     this_policy_path,
                 )
-                continue
+                if not exclusions.keep_excluded:
+                    continue
             # Exclude the managed policies
             if (
                 exclusions.is_policy_excluded(this_policy_name)
@@ -86,7 +87,8 @@ class ManagedPolicyDetails:
                     this_policy_id,
                     this_policy_path,
                 )
-                continue
+                if not exclusions.keep_excluded:
+                    continue
             self.policy_details.append(
                 ManagedPolicy(
                     policy_detail,
@@ -109,6 +111,8 @@ class ManagedPolicyDetails:
         """Return a list of all infrastructure modification actions allowed by all managed policies in violation."""
         result = set()
         for policy in self.policy_details:
+            if policy.is_excluded:
+                continue
             result.update(policy.policy_document.infrastructure_modification)
         return sorted(result)
 
@@ -191,7 +195,12 @@ class ManagedPolicy:
         #   with IsDefaultVersion only.
         self.policy_version_list = policy_detail.get("PolicyVersionList", [])
 
-        self.policy_document = self._policy_document()
+        # A policy kept in the results although excluded (Exclusions.keep_excluded) is
+        # inventory only: building its PolicyDocument would expand wildcards through
+        # policy_sentry, which is exactly the work the exclusion exists to avoid.
+        self._policy_document: PolicyDocument | None = (
+            None if (self.is_excluded and exclusions.keep_excluded) else self._build_policy_document()
+        )
 
         self.severity = [] if severity is None else severity
 
@@ -207,7 +216,14 @@ class ManagedPolicy:
             or is_name_excluded(self.path, "/aws-service-role*")
         )
 
-    def _policy_document(self) -> PolicyDocument:
+    @property
+    def policy_document(self) -> PolicyDocument:
+        """The analyzed policy document, built on first use for kept-excluded policies."""
+        if self._policy_document is None:
+            self._policy_document = self._build_policy_document()
+        return self._policy_document
+
+    def _build_policy_document(self) -> PolicyDocument:
         """Return the policy document object"""
         for policy_version in self.policy_version_list:
             if policy_version.get("IsDefaultVersion") is True:
@@ -257,7 +273,7 @@ class ManagedPolicy:
             principals = self.iam_data[principal_type].keys()
             for principal_id in principals:
                 managed_policies = {}
-                if self.is_excluded:
+                if self.is_excluded and not self.exclusions.keep_excluded:
                     return {}
                 if self.managed_by == "AWS":
                     managed_policies.update(self.iam_data[principal_type][principal_id]["aws_managed_policies"])
@@ -267,9 +283,47 @@ class ManagedPolicy:
                     attached[principal_type].append(self.iam_data[principal_type][principal_id]["name"])
         return attached
 
+    def _json_without_findings(self, include_infrastructure_modification: bool) -> dict[str, Any]:
+        """The json/json_large shape for a kept-excluded policy: metadata and attachments
+        intact, every findings list empty, no analysis performed."""
+        categories = [
+            "PrivilegeEscalation",
+            "DataExfiltration",
+            "ResourceExposure",
+            "ServiceWildcard",
+            "CredentialsExposure",
+        ]
+        if include_infrastructure_modification:
+            categories.append("InfrastructureModification")
+        entry: dict[str, Any] = {
+            "PolicyName": self.policy_name,
+            "PolicyId": self.policy_id,
+            "Arn": self.arn,
+            "Path": self.path,
+            "DefaultVersionId": self.default_version_id,
+            "AttachmentCount": self.attachment_count,
+            "AttachedTo": self.getAttached,
+            "IsAttachable": self.is_attachable,
+            "CreateDate": self.create_date,
+            "UpdateDate": self.update_date,
+            "PolicyVersionList": self.policy_version_list,
+        }
+        for category in categories:
+            entry[category] = {
+                "severity": ISSUE_SEVERITY[category],
+                "description": RISK_DEFINITION[category],
+                "findings": [],
+            }
+            if category == "PrivilegeEscalation":
+                entry[category]["links"] = {}
+        entry["is_excluded"] = self.is_excluded
+        return entry
+
     @property
     def json(self) -> dict[str, Any]:
         """Return JSON output for high risk actions"""
+        if self.is_excluded and self._policy_document is None:
+            return self._json_without_findings(include_infrastructure_modification=False)
         return {
             "PolicyName": self.policy_name,
             "PolicyId": self.policy_id,
@@ -338,6 +392,8 @@ class ManagedPolicy:
     @property
     def json_large(self) -> dict[str, Any]:
         """Return JSON output - including Infra Modification actions, which can be large"""
+        if self.is_excluded and self._policy_document is None:
+            return self._json_without_findings(include_infrastructure_modification=True)
         return {
             "PolicyName": self.policy_name,
             "PolicyId": self.policy_id,
