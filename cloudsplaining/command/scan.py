@@ -24,7 +24,7 @@ from cloudsplaining import set_log_level
 from cloudsplaining.identity_inventory.inventory import build_identity_inventory
 from cloudsplaining.output.report import HTMLReport
 from cloudsplaining.scan.authorization_details import AuthorizationDetails
-from cloudsplaining.shared.constants import EXCLUSIONS_FILE
+from cloudsplaining.shared.constants import DEFAULT_EXCLUSIONS_CONFIG, EXCLUSIONS_FILE
 from cloudsplaining.shared.exclusions import DEFAULT_EXCLUSIONS, Exclusions
 from cloudsplaining.shared.utils import write_results_data_file
 from cloudsplaining.shared.validation import check_authorization_details_schema
@@ -104,6 +104,15 @@ from cloudsplaining.shared.validation import check_authorization_details_schema
     is_flag=True,
     help="Flag risky trust policies in roles.",
 )
+@click.option(
+    "-x",
+    "--flag-excluded",
+    required=False,
+    default=False,
+    is_flag=True,
+    help="Keep excluded policies in the results - marked is_excluded, attachments and "
+    "document intact, findings suppressed - instead of omitting them.",
+)
 def scan(
     input_file: str,
     exclusions_file: str,
@@ -114,6 +123,7 @@ def scan(
     verbosity: int,
     severity: list[str],
     flag_trust_policies: bool,
+    flag_excluded: bool,
 ) -> None:  # pragma: no cover
     """
     Given the path to account authorization details files and the exclusions config file, scan all inline and
@@ -128,9 +138,9 @@ def scan(
                 exclusions_cfg = yaml.safe_load(yaml_file)
             except yaml.YAMLError as exc:
                 logger.critical(exc)
-        exclusions = Exclusions(exclusions_cfg)
+        exclusions = Exclusions(exclusions_cfg, keep_excluded=flag_excluded)
     else:
-        exclusions = DEFAULT_EXCLUSIONS
+        exclusions = Exclusions(DEFAULT_EXCLUSIONS_CONFIG, keep_excluded=True) if flag_excluded else DEFAULT_EXCLUSIONS
 
     if flag_all_risky_actions:
         flag_conditional_statements = True

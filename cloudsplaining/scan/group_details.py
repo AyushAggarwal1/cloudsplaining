@@ -159,7 +159,9 @@ class GroupDetail:
                 policy_name = policy_detail.get("PolicyName")
                 policy_document = policy_detail.get("PolicyDocument")
                 policy_id = get_non_provider_id(json.dumps(policy_document))
-                if not (exclusions.is_policy_excluded(policy_name) or exclusions.is_policy_excluded(policy_id)):
+                if exclusions.keep_excluded or not (
+                    exclusions.is_policy_excluded(policy_name) or exclusions.is_policy_excluded(policy_id)
+                ):
                     # NOTE: The Exclusions were not here before the #254 fix (which was an unfiled bug I just discovered) so the presence of this might break some older unit tests. Might need to fix that.
                     inline_policy = InlinePolicy(
                         policy_detail,
@@ -176,7 +178,7 @@ class GroupDetail:
         if not self.is_excluded:
             for policy in group_detail.get("AttachedManagedPolicies", []):
                 arn = policy.get("PolicyArn")
-                if not (
+                if exclusions.keep_excluded or not (
                     exclusions.is_policy_excluded(arn)
                     or exclusions.is_policy_excluded(get_full_policy_path(arn))
                     or exclusions.is_policy_excluded(get_policy_name(arn))

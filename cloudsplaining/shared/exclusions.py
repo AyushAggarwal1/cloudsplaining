@@ -44,9 +44,14 @@ def _report_exclusion(message: str) -> None:
 class Exclusions:
     """Contains the exclusions configuration as an object"""
 
-    def __init__(self, exclusions_config: dict[str, list[str]] = DEFAULT_EXCLUSIONS_CONFIG) -> None:
+    def __init__(
+        self, exclusions_config: dict[str, list[str]] = DEFAULT_EXCLUSIONS_CONFIG, keep_excluded: bool = False
+    ) -> None:
         check_exclusions_schema(exclusions_config)
         self.config = exclusions_config
+        # keep_excluded keeps excluded policies in scan results - flagged is_excluded,
+        # attachments and document intact, findings suppressed - instead of dropping them.
+        self.keep_excluded = keep_excluded
         self.include_actions = self._include_actions()
         self.exclude_actions = self._exclude_actions()
         self.roles = self._roles()

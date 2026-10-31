@@ -1216,3 +1216,42 @@ class TestOciAuditCompartments(unittest.TestCase):
         self.assertFalse(covered("ocid.tenancy", _PROD_USER_CREATED))
         self.assertFalse(covered("ocid.cmp.prod", _OCI_USER_CREATED))
         self.assertEqual({c for c, _, _ in audit.calls}, {"ocid.tenancy", "ocid.cmp.prod"})
+
+
+class _StubMembershipAzureCollector(AzureCollector):
+    """Two groups; member listing is denied on the second, like a tenant whose app grant
+    covers Group.Read.All but not the locked group's members."""
+
+    def __init__(self):
+        credential = type("Cred", (), {"get_token": lambda self, scope: type("T", (), {"token": "t"})()})()
+        super().__init__(subscription_id="sub", credential=credential)
+        self.member_paths = []
+
+    def _graph_list(self, token, path):
+        if "signInActivity" in path:
+            raise RuntimeError("Authentication_RequestFromNonPremiumTenantOrB2CTenant")
+        if "directoryAudits" in path or "servicePrincipalSignInActivities" in path:
+            return []
+        if path.startswith("/users"):
+            return [{"id": "u1", "userPrincipalName": "jane@contoso.com"}]
+        if path.startswith("/servicePrincipals"):
+            return []
+        if path.startswith("/groups/"):
+            self.member_paths.append(path)
+            if "/g2/" in path:
+                raise RuntimeError("Authorization_RequestDenied")
+            return [{"id": "u1"}, {"id": "user-via-nested-group"}]
+        return [{"id": "g1", "displayName": "Engineering"}, {"id": "g2", "displayName": "Locked"}]
+
+
+class TestAzureGroupMemberships(unittest.TestCase):
+    def test_memberships_are_transitive_and_per_group_best_effort(self):
+        collector = _StubMembershipAzureCollector()
+        snapshot = {"users": [], "groups": [], "servicePrincipals": [], "groupMemberships": {}}
+        collector._collect_graph(snapshot)
+        # g2's denial must not discard g1's members, and nested members arrive flattened.
+        self.assertEqual(snapshot["groupMemberships"], {"g1": ["u1", "user-via-nested-group"]})
+        self.assertEqual([group["id"] for group in snapshot["groups"]], ["g1", "g2"])
+        self.assertTrue(collector.member_paths)
+        for path in collector.member_paths:
+            self.assertIn("transitiveMembers", path)
