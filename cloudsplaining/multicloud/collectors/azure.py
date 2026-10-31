@@ -139,7 +139,14 @@ class AzureCollector(Collector):
         memberships: dict[str, list[str]] = {}
         for group in snapshot["groups"]:
             gid = group["id"]
-            members = self._graph_list(token, f"/groups/{gid}/members?$select=id")
+            # transitiveMembers flattens nested groups, so members inherit role
+            # assignments made to a parent group. Per-group best effort: one denied
+            # group must not discard every other group's membership.
+            try:
+                members = self._graph_list(token, f"/groups/{gid}/transitiveMembers?$select=id")
+            except Exception as error:
+                logger.warning("Skipping members of group %s: %s", gid, error)
+                continue
             memberships[gid] = [m["id"] for m in members if "id" in m]
         snapshot["groupMemberships"] = memberships
 
